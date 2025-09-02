@@ -800,9 +800,6 @@ function init(){
   refreshProjectsList();
   toggleImageActions(!!state.fullBitmap);
 }
-function bindEvents(){ /* (defined earlier) */ }
-bindEvents();
-window.addEventListener('load', init);
 
 /////////////////////////////// Helpers (mask scaling) ///////////////////////////////
 function scaleMask(mask,w0,h0,w1,h1){
