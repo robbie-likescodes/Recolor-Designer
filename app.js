@@ -1,17 +1,21 @@
-/* Palette Mapper — Cup Print Helper (All-in-One JS)
+/* Palette Mapper — Cup Print Helper (Updated JS with Eyedropper + Region Restrictions)
    Features:
-   - Mobile-friendly image upload (camera OK), clipboard paste (desktop)
-   - Full-resolution processing option + preview size control
-   - User-defined palette (hex), add/remove, presets (save/load)
+   - Mobile-friendly upload (camera roll supported with accept="image/*")
+   - Clipboard paste (desktop)
+   - Full-resolution processing option + preview width control
+   - User-defined palette (hex) with add/remove and saved presets
+   - Eyedropper (long-press / press-and-hold on Original) to add sampled color
+   - Region tool: draw rectangular regions and restrict which palette colors can appear there
    - Auto-extract palette via simple K-means on preview
-   - Perceptual nearest-color mapping in CIELAB with tolerance sliders:
-       * Lightness weight (L*)
-       * Chroma weight (a*, b*)
+   - Perceptual nearest-color mapping in CIELAB, with Lightness/Chroma weight sliders
    - Optional Floyd–Steinberg dithering
    - Background handling: keep alpha / force white / force transparency
    - PNG download (mapped result)
    - Projects saved locally (IndexedDB): image + settings, import/export JSON
    - Works as a static app (GitHub Pages-ready). No dependencies.
+
+   NOTE: If your HTML doesn’t include the Eyedropper popover or Region tool panel,
+         this script will automatically inject minimal UI for them.
 */
 
 // ---------- DOM refs ----------
@@ -24,6 +28,7 @@ const els = {
   keepFullRes: document.getElementById('keepFullRes'),
   srcCanvas: document.getElementById('srcCanvas'),
   outCanvas: document.getElementById('outCanvas'),
+
   // Palette controls
   addColor: document.getElementById('addColor'),
   clearColors: document.getElementById('clearColors'),
@@ -31,6 +36,7 @@ const els = {
   paletteList: document.getElementById('paletteList'),
   kColors: document.getElementById('kColors'),
   autoExtract: document.getElementById('autoExtract'),
+
   // Mapping options
   wChroma: document.getElementById('wChroma'),
   wLight: document.getElementById('wLight'),
@@ -40,6 +46,7 @@ const els = {
   bgMode: document.getElementById('bgMode'),
   applyBtn: document.getElementById('applyBtn'),
   downloadBtn: document.getElementById('downloadBtn'),
+
   // Projects pane + palettes
   openProjects: document.getElementById('openProjects'),
   closeProjects: document.getElementById('closeProjects'),
@@ -53,6 +60,9 @@ const els = {
   savedPalettes: document.getElementById('savedPalettes'),
   savePalette: document.getElementById('savePalette'),
   clearSavedPalettes: document.getElementById('clearSavedPalettes'),
+
+  // Containers for auto-injected UI
+  controlsSection: document.querySelector('.controls'),
 };
 
 const sctx = els.srcCanvas.getContext('2d', { willReadFrequently: true });
@@ -65,6 +75,9 @@ const state = {
   fullH: 0,
   selectedProjectId: null,
 };
+
+// Regions store (preview-space rectangles)
+const regions = []; // each: { x0,y0,x1,y1, allowed: Set<number> }
 
 // ---------- Utilities ----------
 const clamp = (v, min, max) => v < min ? min : (v > max ? max : v);
@@ -209,7 +222,7 @@ function renderSavedPalettes() {
     const div = document.createElement('div');
     div.className = 'item';
     const swatches = p.colors.map(h => (
-      `<span title="${h}" style="display:inline-block;width:16px;height:16px;border-radius:4px;border:1px solid #334155;background:${h}"></span>`
+      `<span title="${h}" style="display:inline-block;width:16px;height:16px;border-radius:4px;border:1px solid #334155;display:inline-block;background:${h}"></span>`
     )).join('');
     div.innerHTML = `
       <div><strong>${p.name || ('Palette ' + (idx + 1))}</strong><br><small>${p.colors.join(', ')}</small></div>
@@ -217,39 +230,6 @@ function renderSavedPalettes() {
     `;
     div.addEventListener('click', () => setPalette(p.colors));
     els.savedPalettes.appendChild(div);
-  });
-}
-
-// ---------- Projects UI ----------
-function setPane(open) {
-  if (!els.projectsPane) return;
-  els.projectsPane.classList.toggle('open', open);
-  els.projectsPane.setAttribute('aria-hidden', String(!open));
-}
-async function refreshProjectsList() {
-  if (!els.projectsList) return;
-  const arr = await dbGetAll();
-  arr.sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt)); // newest first
-  els.projectsList.innerHTML = '';
-  arr.forEach(rec => {
-    const div = document.createElement('div');
-    div.className = 'item';
-    const d = new Date(rec.updatedAt || rec.createdAt);
-    div.innerHTML = `
-      <div><strong>${rec.name || ('Project ' + rec.id)}</strong><br><small>${d.toLocaleString()}</small></div>
-      <div><button class="ghost" data-id="${rec.id}" type="button">Load</button></div>
-    `;
-    div.addEventListener('click', () => {
-      state.selectedProjectId = rec.id;
-      [...els.projectsList.children].forEach(ch => ch.classList.remove('selected'));
-      div.classList.add('selected');
-    });
-    div.querySelector('button').addEventListener('click', async (e) => {
-      e.stopPropagation();
-      await loadProject(rec.id);
-      setPane(false);
-    });
-    els.projectsList.appendChild(div);
   });
 }
 
@@ -313,8 +293,8 @@ function buildPaletteLab(pal) {
   return pal.map(([r, g, b]) => ({ rgb: [r, g, b], lab: rgbToLab(r, g, b) }));
 }
 
-// ---------- Mapping (with optional Floyd–Steinberg dithering) ----------
-function mapToPalette(imgData, palette, wL = 1.0, wC = 1.0, dither = false, bgMode = 'keep') {
+// ---------- Mapping (with optional Floyd–Steinberg dithering + region restrictions) ----------
+function mapToPalette(imgData, palette, wL = 1.0, wC = 1.0, dither = false, bgMode = 'keep', effRegions = []) {
   const w = imgData.width, h = imgData.height;
   const src = imgData.data;
   const out = new ImageData(w, h);
@@ -352,9 +332,22 @@ function mapToPalette(imgData, palette, wL = 1.0, wC = 1.0, dither = false, bgMo
         b = clamp(Math.round(b + errB[idx]), 0, 255);
       }
 
+      // Check region restrictions (last-created region has priority)
+      let allowedSet = null;
+      if (effRegions && effRegions.length) {
+        for (let ri = effRegions.length - 1; ri >= 0; ri--) {
+          const R = effRegions[ri];
+          if (x >= R.x0 && x <= R.x1 && y >= R.y0 && y <= R.y1) {
+            allowedSet = R.allowed;
+            break;
+          }
+        }
+      }
+
       const lab = rgbToLab(r, g, b);
       let best = 0, bestD = Infinity;
       for (let p = 0; p < palLab.length; p++) {
+        if (allowedSet && !allowedSet.has(p)) continue;
         const d2 = deltaE2Weighted(lab, palLab[p].lab, wL, wC);
         if (d2 < bestD) { bestD = d2; best = p; }
       }
@@ -418,6 +411,251 @@ function kmeans(data, k = 5, iters = 10) {
   return centers;
 }
 
+// ---------- Eyedropper (press-and-hold on Original) ----------
+function ensureEyedropperUI() {
+  if (document.getElementById('eyedropperPopover')) return;
+  const pop = document.createElement('div');
+  pop.id = 'eyedropperPopover';
+  pop.style.cssText = `
+    position:absolute;z-index:50;background:#111827;border:1px solid #1f2937;
+    border-radius:10px;padding:10px;box-shadow:0 8px 24px rgba(0,0,0,.35);
+    display:none;
+  `;
+  pop.innerHTML = `
+    <div id="eyeSwatch" style="width:28px;height:28px;border-radius:6px;border:1px solid #334155;margin-bottom:6px"></div>
+    <code id="eyeHex" style="display:block;margin-bottom:8px">#000000</code>
+    <div class="row" style="display:flex;gap:8px">
+      <button id="eyeAdd" type="button">Add to palette</button>
+      <button id="eyeCancel" type="button" class="ghost">Cancel</button>
+    </div>
+  `;
+  document.body.appendChild(pop);
+}
+function getCanvasPointFromEvent(canvas, evt) {
+  const rect = canvas.getBoundingClientRect();
+  const x = Math.floor((evt.clientX - rect.left) * canvas.width / rect.width);
+  const y = Math.floor((evt.clientY - rect.top) * canvas.height / rect.height);
+  return { x, y, rect };
+}
+function setupEyedropper() {
+  ensureEyedropperUI();
+  const pop = document.getElementById('eyedropperPopover');
+  const eyeSwatch = document.getElementById('eyeSwatch');
+  const eyeHex = document.getElementById('eyeHex');
+  const eyeAdd = document.getElementById('eyeAdd');
+  const eyeCancel = document.getElementById('eyeCancel');
+
+  let eyeTimer = null, eyeColorHex = '#000000', anchor = { x: 0, y: 0 };
+
+  function hide() { pop.style.display = 'none'; }
+  function show(clientX, clientY) {
+    pop.style.left = clientX + 12 + 'px';
+    pop.style.top = clientY + 12 + 'px';
+    pop.style.display = 'block';
+  }
+  function sample(evt) {
+    const pt = getCanvasPointFromEvent(els.srcCanvas, evt);
+    if (pt.x < 0 || pt.y < 0 || pt.x >= els.srcCanvas.width || pt.y >= els.srcCanvas.height) return null;
+    const d = sctx.getImageData(pt.x, pt.y, 1, 1).data;
+    return { r: d[0], g: d[1], b: d[2], a: d[3] };
+  }
+
+  function start(evt) {
+    clearTimeout(eyeTimer);
+    anchor = { x: evt.clientX, y: evt.clientY };
+    eyeTimer = setTimeout(() => {
+      const px = sample(evt);
+      if (!px) return;
+      eyeColorHex = rgbToHex(px.r, px.g, px.b);
+      eyeSwatch.style.background = eyeColorHex;
+      eyeHex.textContent = eyeColorHex;
+      show(anchor.x, anchor.y);
+    }, 500);
+  }
+  function end() { clearTimeout(eyeTimer); }
+
+  // Pointer events
+  els.srcCanvas.addEventListener('pointerdown', start);
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => {
+    els.srcCanvas.addEventListener(ev, end);
+  });
+
+  // ALT-click quick add (desktop)
+  els.srcCanvas.addEventListener('click', (evt) => {
+    if (!evt.altKey) return;
+    const px = sctx.getImageData(
+      getCanvasPointFromEvent(els.srcCanvas, evt).x,
+      getCanvasPointFromEvent(els.srcCanvas, evt).y, 1, 1
+    ).data;
+    addPaletteRow(rgbToHex(px[0], px[1], px[2]));
+  });
+
+  eyeAdd.addEventListener('click', () => { addPaletteRow(eyeColorHex); hide(); });
+  eyeCancel.addEventListener('click', hide);
+}
+
+// ---------- Region tool (rectangular) ----------
+const regionEls = {
+  regionMode: document.getElementById('regionMode'),
+  regionClear: document.getElementById('regionClear'),
+  regionConfig: document.getElementById('regionConfig'),
+  regionPaletteChecks: document.getElementById('regionPaletteChecks'),
+  regionApply: document.getElementById('regionApply'),
+  regionCancel: document.getElementById('regionCancel'),
+};
+let marquee, regionIsDrawing = false, rStart = null, pendingRect = null;
+
+function ensureRegionUI() {
+  // If UI exists, wire it; otherwise inject a minimal panel.
+  if (!regionEls.regionMode) {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `
+      <h2>Region tool (optional)</h2>
+      <div class="row wrap">
+        <label class="chk"><input type="checkbox" id="regionMode"> Draw region (drag on Original)</label>
+        <button id="regionClear" type="button" class="ghost">Clear regions</button>
+      </div>
+      <div id="regionConfig" class="region-config" style="margin-top:8px;background:#0b1020;border:1px solid #253047;border-radius:10px;padding:10px;display:none">
+        <h3>Region palette</h3>
+        <div id="regionPaletteChecks"></div>
+        <div class="row gap">
+          <button id="regionApply" type="button">Save region</button>
+          <button id="regionCancel" type="button" class="ghost">Cancel</button>
+        </div>
+        <small>Uncheck colors you do <em>not</em> want to appear in this region.</small>
+      </div>
+    `;
+    (els.controlsSection || document.body).appendChild(card);
+    // refresh references
+    regionEls.regionMode = document.getElementById('regionMode');
+    regionEls.regionClear = document.getElementById('regionClear');
+    regionEls.regionConfig = document.getElementById('regionConfig');
+    regionEls.regionPaletteChecks = document.getElementById('regionPaletteChecks');
+    regionEls.regionApply = document.getElementById('regionApply');
+    regionEls.regionCancel = document.getElementById('regionCancel');
+  }
+
+  // Create marquee overlay inside original canvas wrapper
+  const wrap = els.srcCanvas.parentElement;
+  marquee = document.createElement('div');
+  marquee.className = 'marquee';
+  marquee.style.cssText = 'position:absolute;border:2px dashed #93c5fd;pointer-events:none;display:none;';
+  wrap.style.position = wrap.style.position || 'relative';
+  wrap.appendChild(marquee);
+
+  // Wire handlers
+  regionEls.regionMode.addEventListener('change', () => { marquee.style.display = 'none'; });
+  regionEls.regionClear.addEventListener('click', () => {
+    regions.length = 0;
+    marquee.style.display = 'none';
+    alert('Regions cleared.');
+  });
+
+  regionEls.regionCancel.addEventListener('click', () => {
+    regionEls.regionConfig.style.display = 'none';
+    marquee.style.display = 'none';
+    pendingRect = null;
+  });
+  regionEls.regionApply.addEventListener('click', () => {
+    if (!pendingRect) return;
+    const allowed = new Set();
+    const boxes = [...regionEls.regionPaletteChecks.querySelectorAll('input[type="checkbox"]')];
+    boxes.forEach((cb, idx) => { if (cb.checked) allowed.add(idx); });
+    const rect = normalizeRect(pendingRect);
+    regions.push({ ...rect, allowed });
+    regionEls.regionConfig.style.display = 'none';
+    marquee.style.display = 'none';
+    pendingRect = null;
+    alert('Region saved. Last created region has highest priority in overlaps.');
+  });
+
+  // Canvas pointer interactions (only when regionMode is checked)
+  els.srcCanvas.addEventListener('pointerdown', (evt) => {
+    if (!regionEls.regionMode.checked) return;
+    beginRegion(evt);
+  });
+  els.srcCanvas.addEventListener('pointermove', (evt) => {
+    if (!regionEls.regionMode.checked) return;
+    updateRegion(evt);
+  });
+  ['pointerup','pointerleave','pointercancel'].forEach(ev => {
+    els.srcCanvas.addEventListener(ev, () => {
+      if (!regionEls.regionMode.checked) return;
+      endRegion();
+    });
+  });
+}
+function canvasClientToCanvasXY(clientX, clientY) {
+  const rect = els.srcCanvas.getBoundingClientRect();
+  const x = clamp(Math.floor((clientX - rect.left) * els.srcCanvas.width / rect.width), 0, els.srcCanvas.width - 1);
+  const y = clamp(Math.floor((clientY - rect.top) * els.srcCanvas.height / rect.height), 0, els.srcCanvas.height - 1);
+  return { x, y, rect };
+}
+function beginRegion(evt) {
+  const { x, y, rect } = canvasClientToCanvasXY(evt.clientX, evt.clientY);
+  rStart = { x, y, rect };
+  regionIsDrawing = true;
+  marquee.style.display = 'block';
+  marquee.style.left = evt.clientX + 'px';
+  marquee.style.top = evt.clientY + 'px';
+  marquee.style.width = '0px';
+  marquee.style.height = '0px';
+  marquee._rect = { x0: x, y0: y, x1: x, y1: y };
+}
+function updateRegion(evt) {
+  if (!regionIsDrawing) return;
+  const { x, y, rect } = canvasClientToCanvasXY(evt.clientX, evt.clientY);
+  const x0 = Math.min(rStart.x, x), y0 = Math.min(rStart.y, y);
+  const x1 = Math.max(rStart.x, x), y1 = Math.max(rStart.y, y);
+  const left = rect.left + (x0 * rect.width / els.srcCanvas.width);
+  const top = rect.top + (y0 * rect.height / els.srcCanvas.height);
+  const right = rect.left + (x1 * rect.width / els.srcCanvas.width);
+  const bottom = rect.top + (y1 * rect.height / els.srcCanvas.height);
+  marquee.style.left = left + 'px';
+  marquee.style.top = top + 'px';
+  marquee.style.width = Math.max(1, right - left) + 'px';
+  marquee.style.height = Math.max(1, bottom - top) + 'px';
+  marquee._rect = { x0, y0, x1, y1 };
+}
+function endRegion() {
+  if (!regionIsDrawing) return;
+  regionIsDrawing = false;
+  if (!marquee._rect) { marquee.style.display = 'none'; return; }
+  openRegionConfigurator(marquee._rect);
+}
+function openRegionConfigurator(rect) {
+  pendingRect = rect;
+  regionEls.regionPaletteChecks.innerHTML = '';
+  const pal = getPalette();
+  pal.forEach((rgb, idx) => {
+    const hex = rgbToHex(rgb[0], rgb[1], rgb[2]);
+    const id = 'rchk_' + idx + '_' + Math.random().toString(36).slice(2, 7);
+    const label = document.createElement('label');
+    label.style.display = 'inline-flex';
+    label.style.alignItems = 'center';
+    label.style.gap = '6px';
+    label.style.margin = '4px 8px 4px 0';
+    label.innerHTML = `<input type="checkbox" id="${id}" checked>
+      <span style="width:16px;height:16px;border-radius:4px;border:1px solid #334155;display:inline-block;background:${hex}"></span>
+      ${hex}`;
+    regionEls.regionPaletteChecks.appendChild(label);
+  });
+  regionEls.regionConfig.style.display = 'block';
+  marquee.style.display = 'block';
+}
+function normalizeRect(r) { // ensure x0<=x1, y0<=y1
+  return { x0: Math.min(r.x0, r.x1), y0: Math.min(r.y0, r.y1), x1: Math.max(r.x0, r.x1), y1: Math.max(r.y0, r.y1) };
+}
+function scaleRect(rect, sx, sy) {
+  return {
+    x0: Math.floor(rect.x0 * sx),
+    y0: Math.floor(rect.y0 * sy),
+    x1: Math.floor(rect.x1 * sx),
+    y1: Math.floor(rect.y1 * sy),
+  };
+}
+
 // ---------- Actions / UI wiring ----------
 function updateWeightsUI() {
   if (els.wChromaOut) els.wChromaOut.textContent = fmtMult(els.wChroma.value);
@@ -432,12 +670,13 @@ function bindEvents() {
     setPalette(['#FFFFFF', '#B3753B', '#5B3A21', '#D22C2C', '#1D6E2E']);
   });
 
-  // Image inputs
+  // Image inputs (accept="image/*" supports camera roll & gallery)
   els.fileInput?.addEventListener('change', (e) => {
     const file = e.target.files?.[0];
     if (file) handleFile(file);
   });
 
+  // Clipboard paste (desktop)
   els.pasteBtn?.addEventListener('click', async () => {
     if (!navigator.clipboard || !navigator.clipboard.read) {
       alert('Clipboard image paste not supported on this browser. Use Upload instead.');
@@ -484,7 +723,7 @@ function bindEvents() {
     els.wLight?.addEventListener(ev, updateWeightsUI);
   });
 
-  // Apply mapping
+  // Apply mapping (with region handling)
   els.applyBtn?.addEventListener('click', async () => {
     const pal = getPalette();
     if (pal.length === 0) { alert('Add at least one color to the palette.'); return; }
@@ -494,6 +733,8 @@ function bindEvents() {
     const dither = !!els.useDither.checked;
     const bgMode = els.bgMode.value;
 
+    // Build effective regions for current processing canvas
+    let effectiveRegions = [];
     let procCanvas = els.srcCanvas;
     let usingFull = false;
 
@@ -505,9 +746,19 @@ function bindEvents() {
       usingFull = true;
     }
 
+    if (regions.length) {
+      if (usingFull) {
+        const sx = state.fullW / els.srcCanvas.width;
+        const sy = state.fullH / els.srcCanvas.height;
+        effectiveRegions = regions.map(r => ({ ...scaleRect(normalizeRect(r), sx, sy), allowed: r.allowed }));
+      } else {
+        effectiveRegions = regions.map(r => normalizeRect(r));
+      }
+    }
+
     const ctx = procCanvas.getContext('2d', { willReadFrequently: true });
     const imgData = ctx.getImageData(0, 0, procCanvas.width, procCanvas.height);
-    const out = mapToPalette(imgData, pal, wL, wC, dither, bgMode);
+    const out = mapToPalette(imgData, pal, wL, wC, dither, bgMode, effectiveRegions);
 
     if (usingFull) {
       // preview display, keep full data for download
@@ -669,6 +920,7 @@ function getCurrentSettings() {
     wLight: parseInt(els.wLight.value, 10),
     useDither: !!els.useDither.checked,
     bgMode: els.bgMode.value,
+    regions: regions.map(r => ({ x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y1, allowed: Array.from(r.allowed) })),
   };
 }
 function applySettings(s) {
@@ -680,6 +932,10 @@ function applySettings(s) {
   if (s.wLight) els.wLight.value = s.wLight;
   if ('useDither' in s) els.useDither.checked = !!s.useDither;
   if (s.bgMode) els.bgMode.value = s.bgMode;
+  if (s.regions && Array.isArray(s.regions)) {
+    regions.length = 0;
+    s.regions.forEach(r => regions.push({ x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y1, allowed: new Set(r.allowed || []) }));
+  }
   updateWeightsUI();
 }
 
@@ -712,8 +968,53 @@ function base64ToBlob(b64) {
   return new Blob([bytes], { type: 'image/png' });
 }
 
+// ---------- Projects UI helpers ----------
+function setPane(open) {
+  if (!els.projectsPane) return;
+  els.projectsPane.classList.toggle('open', open);
+  els.projectsPane.setAttribute('aria-hidden', String(!open));
+}
+async function refreshProjectsList() {
+  if (!els.projectsList) return;
+  const arr = await dbGetAll();
+  arr.sort((a, b) => (b.updatedAt || b.createdAt) - (a.updatedAt || a.createdAt)); // newest first
+  els.projectsList.innerHTML = '';
+  arr.forEach(rec => {
+    const div = document.createElement('div');
+    div.className = 'item';
+    const d = new Date(rec.updatedAt || rec.createdAt);
+    div.innerHTML = `
+      <div><strong>${rec.name || ('Project ' + rec.id)}</strong><br><small>${d.toLocaleString()}</small></div>
+      <div><button class="ghost" data-id="${rec.id}" type="button">Load</button></div>
+    `;
+    div.addEventListener('click', () => {
+      state.selectedProjectId = rec.id;
+      [...els.projectsList.children].forEach(ch => ch.classList.remove('selected'));
+      div.classList.add('selected');
+    });
+    div.querySelector('button').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      await loadProject(rec.id);
+      setPane(false);
+    });
+    els.projectsList.appendChild(div);
+  });
+}
+
 // ---------- Init ----------
 function init() {
+  // Fallback: if file input missing, create a basic one to ensure camera roll works
+  if (!els.fileInput) {
+    const up = document.createElement('input');
+    up.type = 'file'; up.accept = 'image/*'; up.id = 'fileInput';
+    up.style.display = 'none';
+    document.body.appendChild(up);
+    up.addEventListener('change', (e) => {
+      const file = e.target.files?.[0]; if (file) handleFile(file);
+    });
+    els.fileInput = up;
+  }
+
   // Default palette / prefs
   const prefs = loadPrefs();
   if (prefs.lastPalette) setPalette(prefs.lastPalette);
@@ -740,7 +1041,7 @@ function init() {
   ['change', 'input'].forEach(ev => {
     document.addEventListener(ev, (e) => {
       if (!e.target) return;
-      if (e.target.closest('.palette-item') ||
+      if (e.target.closest?.('.palette-item') ||
           e.target === els.keepFullRes ||
           e.target === els.maxW ||
           e.target === els.wChroma ||
@@ -751,6 +1052,10 @@ function init() {
       }
     });
   });
+
+  // Auto-inject and wire Eyedropper + Region tool
+  setupEyedropper();
+  ensureRegionUI();
 
   // Projects list on open
   refreshProjectsList();
