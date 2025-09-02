@@ -1,14 +1,5 @@
 /* Palette Mapper — Cup Print Helper (FULL JS)
-   v6 — Editor-first UX + Halftone + Auto 10-color palette on image load
-
-   Includes:
-   - Full-screen Editor overlay (Eyedropper, Lasso, Pan placeholder)
-   - iOS-safe eyedropper (non-passive listeners + preventDefault on canvas)
-   - Polygon regions with per-region palette restrictions
-   - Perceptual Lab mapping + optional Floyd–Steinberg dithering
-   - Halftone dots renderer (cell size, jitter, background) w/ region support
-   - Projects via IndexedDB + Saved palettes via localStorage
-   - NEW in v6: Automatically generates a 10-color palette right after image load
+   v6.1 — Robust uploads (createImageBitmap fallback), Editor-first UX, Halftone, Auto 10-color palette
 */
 
 /////////////////////////////// DOM ///////////////////////////////
@@ -61,7 +52,7 @@ const els = {
   savePalette: document.getElementById('savePalette'),
   clearSavedPalettes: document.getElementById('clearSavedPalettes'),
 
-  // (legacy region card on main — hidden in v5+)
+  // Legacy region card on main — hidden by JS
   regionCard: document.querySelector('.card h2')?.textContent?.toLowerCase().includes('region')
               ? document.querySelector('.card h2')?.closest('.card') : null,
   regionMode: document.getElementById('regionMode'),
@@ -166,17 +157,54 @@ function renderSavedPalettes(){
 }
 
 /////////////////////////////// Image load/preview ///////////////////////////////
-async function handleFile(file){ const bmp=await createImageBitmap(file); state.fullBitmap=bmp; state.fullW=bmp.width; state.fullH=bmp.height; drawSrc(bmp); toggleImageActions(true); }
-function drawSrc(bmp){
-  const mW=parseInt(els.maxW.value||'1400',10); let w=bmp.width, h=bmp.height;
-  if(w>mW){ const s=mW/w; w=Math.round(w*s); h=Math.round(h*s); }
-  els.srcCanvas.width=w; els.srcCanvas.height=h; sctx.clearRect(0,0,w,h); sctx.drawImage(bmp,0,0,w,h);
-  els.outCanvas.width=w; els.outCanvas.height=h; octx.clearRect(0,0,w,h); els.downloadBtn.disabled=true;
-
-  // NEW: auto-build a 10-color palette from the preview (async tick)
-  setTimeout(() => autoPaletteFromCanvas(els.srcCanvas, 10), 0);
+/* Robust loader: try createImageBitmap; fallback to <img> + ObjectURL if it fails */
+async function handleFile(file){
+  if(!file){ return; }
+  try{
+    if (typeof createImageBitmap === 'function') {
+      try {
+        const bmp = await createImageBitmap(file);
+        state.fullBitmap=bmp; state.fullW=bmp.width; state.fullH=bmp.height;
+        drawSrc(bmp); toggleImageActions(true); return;
+      } catch (e) {
+        console.warn('createImageBitmap failed, falling back to Image()', e);
+      }
+    }
+    // Fallback: use Image + object URL
+    const url = URL.createObjectURL(file);
+    const img = await loadImage(url);
+    state.fullBitmap = img; state.fullW = img.naturalWidth || img.width; state.fullH = img.naturalHeight || img.height;
+    drawSrc(img); toggleImageActions(true);
+    URL.revokeObjectURL(url);
+  } catch (err){
+    console.error('Image load error:', err);
+    alert('Could not open that image. Try a different file or take a new photo.');
+  }
 }
-function toggleImageActions(enable){ els.applyBtn.disabled=!enable; if(els.autoExtract) els.autoExtract.disabled=!enable; els.resetBtn.disabled=!enable; }
+function loadImage(url){
+  return new Promise((resolve,reject)=>{
+    const img=new Image(); img.decoding='async'; img.onload=()=>resolve(img); img.onerror=reject; img.src=url;
+  });
+}
+
+function drawSrc(bmp){
+  const mW=parseInt(els.maxW.value||'1400',10);
+  let w=bmp.width||bmp.naturalWidth, h=bmp.height||bmp.naturalHeight;
+  if(w>mW){ const s=mW/w; w=Math.round(w*s); h=Math.round(h*s); }
+  els.srcCanvas.width=w; els.srcCanvas.height=h;
+  sctx.clearRect(0,0,w,h); sctx.drawImage(bmp,0,0,w,h);
+
+  els.outCanvas.width=w; els.outCanvas.height=h; octx.clearRect(0,0,w,h);
+  els.downloadBtn.disabled=true;
+
+  // Auto-build a 10-color palette (async tick, guarded)
+  setTimeout(() => { try { autoPaletteFromCanvas(els.srcCanvas, 10); } catch(e){ console.warn('autoPaletteFromCanvas failed', e); } }, 0);
+}
+function toggleImageActions(enable){
+  els.applyBtn.disabled=!enable;
+  if(els.autoExtract) els.autoExtract.disabled=!enable;
+  els.resetBtn.disabled=!enable;
+}
 
 /////////////////////////////// Color math ///////////////////////////////
 function srgbToLinear(u){ u/=255; return (u<=0.04045)? u/12.92 : Math.pow((u+0.055)/1.055,2.4); }
@@ -333,8 +361,7 @@ function kmeans(data,k=5,iters=10){
   return centers;
 }
 
-/////////////////////////////// Auto Palette (NEW) ///////////////////////////////
-/** Downsample canvas lines for fast clustering */
+/////////////////////////////// Auto Palette (10 colors) ///////////////////////////////
 function sampleImageDataForClustering(ctx, w, h, targetPixels = 120000) {
   const step = Math.max(1, Math.floor(Math.sqrt((w * h) / targetPixels)));
   const outW = Math.floor(w / step), outH = Math.floor(h / step);
@@ -352,7 +379,6 @@ function sampleImageDataForClustering(ctx, w, h, targetPixels = 120000) {
   }
   return sampled;
 }
-/** Count pixels per center (RGB euclidean) */
 function countClusterSizes(centers, data) {
   const counts = new Array(centers.length).fill(0);
   const n = data.length / 4;
@@ -369,7 +395,6 @@ function countClusterSizes(centers, data) {
   }
   return counts;
 }
-/** Build and set a K-color palette from the current preview canvas */
 async function autoPaletteFromCanvas(canvas, k = 10) {
   if (!canvas || !canvas.width) return;
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
@@ -382,7 +407,7 @@ async function autoPaletteFromCanvas(canvas, k = 10) {
   setPalette(hexes);
 }
 
-//////////////////// Main preview-alt-click sampler (desktop only) ////////////////////
+//////////////////// Desktop-only alt-click sampler ////////////////////
 (function desktopAltClickSampler(){
   els.srcCanvas.addEventListener('click',(evt)=>{
     if(!evt.altKey) return;
@@ -410,7 +435,8 @@ function buildLassoChecks(){
 
 function openEditor(){
   if(!state.fullBitmap){ alert('Load an image first.'); return; }
-  els.editorOverlay?.classList.remove('hidden'); els.editorOverlay?.setAttribute('aria-hidden','false'); editor.active=true;
+  els.editorOverlay?.classList.remove('hidden'); els.editorOverlay?.setAttribute('aria-hidden','false'); 
+  editor.active=true;
 
   // Fit canvases to viewport
   const vw=window.innerWidth, vh=window.innerHeight; const rightW=(vw>900)?320:0, toolbarH=50;
@@ -545,6 +571,7 @@ function bindEvents(){
   });
 
   els.resetBtn?.addEventListener('click', ()=>{ if(!state.fullBitmap) return; drawSrc(state.fullBitmap); });
+
   els.maxW?.addEventListener('change', ()=>{ if(state.fullBitmap) drawSrc(state.fullBitmap); });
 
   // Palette
@@ -552,7 +579,20 @@ function bindEvents(){
   els.clearColors?.addEventListener('click', ()=>{ els.paletteList.innerHTML=''; });
   els.loadExample?.addEventListener('click', ()=>{ setPalette(['#FFFFFF','#B3753B','#5B3A21','#D22C2C','#1D6E2E']); });
 
-  // Manual auto-extract button (optional)
+  // Saved palettes controls (were missing listeners in v6)
+  els.savePalette?.addEventListener('click', ()=>{
+    const name = prompt('Save palette as (optional name):') || `Palette ${Date.now()}`;
+    const colors = getPalette().map(([r,g,b])=>rgbToHex(r,g,b));
+    const list = loadSavedPalettes(); list.unshift({ name, colors });
+    saveSavedPalettes(list.slice(0,50)); // keep last 50
+    renderSavedPalettes();
+  });
+  els.clearSavedPalettes?.addEventListener('click', ()=>{
+    if(!confirm('Clear all saved palettes?')) return;
+    saveSavedPalettes([]); renderSavedPalettes();
+  });
+
+  // Manual auto-extract button
   els.autoExtract?.addEventListener('click', ()=>{
     if(!els.srcCanvas.width){ alert('Load an image first.'); return; }
     const k=clamp(parseInt(els.kColors.value||'5',10),2,16);
@@ -560,10 +600,10 @@ function bindEvents(){
     const centers=kmeans(img.data,k,10); setPalette(centers.map(([r,g,b])=>rgbToHex(r,g,b)));
   });
 
-  // Sliders UI
+  // Slider outputs
   ['input','change'].forEach(ev=>{ els.wChroma?.addEventListener(ev, updateWeightsUI); els.wLight?.addEventListener(ev, updateWeightsUI); });
 
-  // Apply mapping (halftone branch or pixel mapping)
+  // Apply mapping
   els.applyBtn?.addEventListener('click', async ()=>{
     const pal=getPalette(); if(!pal.length){ alert('Add at least one color to the palette.'); return; }
     const wL=parseInt(els.wLight.value,10)/100, wC=parseInt(els.wChroma.value,10)/100;
@@ -654,6 +694,7 @@ function bindEvents(){
   els.saveProject?.addEventListener('click', async ()=>{
     if(!state.fullBitmap){ alert('Load an image first.'); return; }
     const name=prompt('Project name?')||`Project ${Date.now()}`;
+    // Draw full bitmap into a canvas
     const tmp=document.createElement('canvas'); tmp.width=state.fullW; tmp.height=state.fullH; tmp.getContext('2d').drawImage(state.fullBitmap,0,0);
     const blob=await new Promise(res=>tmp.toBlob(res,'image/png',0.92));
     const rec={ id: state.selectedProjectId||undefined, name, createdAt:Date.now(), updatedAt:Date.now(), settings:getCurrentSettings(), imageBlob:blob };
@@ -731,8 +772,12 @@ function applySettings(s){
 }
 async function loadProject(id){
   const rec=await dbGet(id); if(!rec){ alert('Project not found.'); return; }
-  const bmp=await createImageBitmap(rec.imageBlob);
-  state.fullBitmap=bmp; state.fullW=bmp.width; state.fullH=bmp.height; drawSrc(bmp); toggleImageActions(true); applySettings(rec.settings); state.selectedProjectId=id;
+  // Robust load from Blob via Image() to avoid createImageBitmap issues
+  const url = URL.createObjectURL(rec.imageBlob);
+  const img = await loadImage(url);
+  URL.revokeObjectURL(url);
+  state.fullBitmap=img; state.fullW=img.naturalWidth||img.width; state.fullH=img.naturalHeight||img.height;
+  drawSrc(img); toggleImageActions(true); applySettings(rec.settings); state.selectedProjectId=id;
 }
 
 /////////////////////////////// Blobs ///////////////////////////////
@@ -754,52 +799,60 @@ async function refreshProjectsList(){
 
 /////////////////////////////// Init ///////////////////////////////
 function init(){
-  // Hide/disable legacy region UI on main page
-  if(els.regionCard) els.regionCard.style.display='none';
-  if(els.regionMode){ els.regionMode.checked=false; els.regionMode.disabled=true; }
-  if(els.regionClear){ els.regionClear.disabled=true; }
-  if(els.regionConfig){ els.regionConfig.hidden=true; }
+  try{
+    // Hide/disable legacy region UI on main page
+    if(els.regionCard) els.regionCard.style.display='none';
+    if(els.regionMode){ els.regionMode.checked=false; els.regionMode.disabled=true; }
+    if(els.regionClear){ els.regionClear.disabled=true; }
+    if(els.regionConfig){ els.regionConfig.hidden=true; }
 
-  const prefs=loadPrefs();
-  if(prefs.lastPalette) setPalette(prefs.lastPalette); else setPalette(['#FFFFFF','#000000']);
-  if(prefs.keepFullRes!==undefined) els.keepFullRes.checked=!!prefs.keepFullRes;
-  if(prefs.maxW) els.maxW.value=prefs.maxW;
-  if(prefs.wChroma) els.wChroma.value=prefs.wChroma;
-  if(prefs.wLight) els.wLight.value=prefs.wLight;
-  if(prefs.bgMode) els.bgMode.value=prefs.bgMode;
-  if(prefs.useDither!==undefined) els.useDither.checked=!!prefs.useDither;
-  if(prefs.useHalftone!==undefined) els.useHalftone.checked=!!prefs.useHalftone;
-  if(prefs.dotCell) els.dotCell.value=prefs.dotCell;
-  if(prefs.dotBg) els.dotBg.value=prefs.dotBg;
-  if(prefs.dotJitter!==undefined) els.dotJitter.checked=!!prefs.dotJitter;
-  updateWeightsUI(); renderSavedPalettes();
+    const prefs=loadPrefs();
+    if(prefs.lastPalette) setPalette(prefs.lastPalette); else setPalette(['#FFFFFF','#000000']);
+    if(prefs.keepFullRes!==undefined) els.keepFullRes.checked=!!prefs.keepFullRes;
+    if(prefs.maxW) els.maxW.value=prefs.maxW;
+    if(prefs.wChroma) els.wChroma.value=prefs.wChroma;
+    if(prefs.wLight) els.wLight.value=prefs.wLight;
+    if(prefs.bgMode) els.bgMode.value=prefs.bgMode;
+    if(prefs.useDither!==undefined) els.useDither.checked=!!prefs.useDither;
+    if(prefs.useHalftone!==undefined) els.useHalftone.checked=!!prefs.useHalftone;
+    if(prefs.dotCell) els.dotCell.value=prefs.dotCell;
+    if(prefs.dotBg) els.dotBg.value=prefs.dotBg;
+    if(prefs.dotJitter!==undefined) els.dotJitter.checked=!!prefs.dotJitter;
+    updateWeightsUI(); renderSavedPalettes();
 
-  const savePrefsNow=()=>savePrefs({
-    lastPalette: getPalette().map(([r,g,b])=>rgbToHex(r,g,b)),
-    keepFullRes: els.keepFullRes.checked,
-    maxW: parseInt(els.maxW.value,10),
-    wChroma: parseInt(els.wChroma.value,10),
-    wLight: parseInt(els.wLight.value,10),
-    bgMode: els.bgMode.value,
-    useDither: els.useDither.checked,
-    useHalftone: els.useHalftone?.checked,
-    dotCell: parseInt(els.dotCell?.value||'6',10),
-    dotBg: els.dotBg?.value||'#FFFFFF',
-    dotJitter: !!els.dotJitter?.checked,
-  });
-  ['change','input'].forEach(ev=>{
-    document.addEventListener(ev,(e)=>{
-      if(!e.target) return;
-      if(e.target.closest?.('.palette-item') ||
-         [els.keepFullRes,els.maxW,els.wChroma,els.wLight,els.bgMode,els.useDither,els.useHalftone,els.dotCell,els.dotBg,els.dotJitter].includes(e.target)){
-        savePrefsNow();
-      }
-    }, {passive:true});
-  });
+    // Save prefs when relevant controls change
+    const savePrefsNow=()=>savePrefs({
+      lastPalette: getPalette().map(([r,g,b])=>rgbToHex(r,g,b)),
+      keepFullRes: els.keepFullRes.checked,
+      maxW: parseInt(els.maxW.value,10),
+      wChroma: parseInt(els.wChroma.value,10),
+      wLight: parseInt(els.wLight.value,10),
+      bgMode: els.bgMode.value,
+      useDither: els.useDither.checked,
+      useHalftone: els.useHalftone?.checked,
+      dotCell: parseInt(els.dotCell?.value||'6',10),
+      dotBg: els.dotBg?.value||'#FFFFFF',
+      dotJitter: !!els.dotJitter?.checked,
+    });
+    ['change','input'].forEach(ev=>{
+      document.addEventListener(ev,(e)=>{
+        if(!e.target) return;
+        if(e.target.closest?.('.palette-item') ||
+           [els.keepFullRes,els.maxW,els.wChroma,els.wLight,els.bgMode,els.useDither,els.useHalftone,els.dotCell,els.dotBg,els.dotJitter].includes(e.target)){
+          savePrefsNow();
+        }
+      }, {passive:true});
+    });
 
-  refreshProjectsList();
-  toggleImageActions(!!state.fullBitmap);
+    refreshProjectsList();
+    toggleImageActions(!!state.fullBitmap);
+  }catch(e){
+    console.error('Init error:', e);
+  }
 }
+
+bindEvents();
+window.addEventListener('load', init);
 
 /////////////////////////////// Helpers (mask scaling) ///////////////////////////////
 function scaleMask(mask,w0,h0,w1,h1){
