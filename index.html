@@ -17,6 +17,32 @@
   <button id="openProjects" class="ghost" type="button">Projects</button>
 </header>
 
+<!-- Projects side pane -->
+<aside id="projectsPane" class="sidepane" aria-hidden="true">
+  <div class="panehead">
+    <h2>Projects</h2>
+    <button id="closeProjects" class="ghost" type="button" aria-label="Close">✕</button>
+  </div>
+  <div class="panecontent">
+    <div class="row wrap gap">
+      <button id="saveProject" type="button">Save current</button>
+      <button id="refreshProjects" type="button">Refresh list</button>
+    </div>
+
+    <div id="projectsList" class="list" aria-label="Saved projects"></div>
+
+    <hr>
+
+    <div class="row wrap gap">
+      <button id="exportProject" type="button">Export selected</button>
+      <label class="filelike">Import
+        <input type="file" id="importProject" accept="application/json">
+      </label>
+      <button id="deleteProject" class="danger" type="button">Delete selected</button>
+    </div>
+  </div>
+</aside>
+
 <main>
   <section class="controls">
     <!-- 1) Load image -->
@@ -48,7 +74,7 @@
       </div>
       <small>
         “Upload” lets you choose from Photo Library or Camera.  
-        “Camera” button forces the camera only.
+        “Camera” forces the camera only.
       </small>
     </div>
 
@@ -61,16 +87,19 @@
         <button id="clearColors" type="button">Clear</button>
         <button id="loadExample" type="button">Load example</button>
       </div>
+
       <details>
         <summary>Auto-extract from image (optional)</summary>
         <div class="row gap wrap">
           <label>K (colors) <input type="number" id="kColors" value="5" min="2" max="16"></label>
           <button id="autoExtract" type="button" disabled>Extract</button>
         </div>
+        <small>Extract a starting palette, then edit hex to exact brand/spot colors.</small>
       </details>
+
       <div class="card subtle">
         <h3>Saved Palettes</h3>
-        <div id="savedPalettes" class="list tiny"></div>
+        <div id="savedPalettes" class="list tiny" aria-label="Saved palettes"></div>
         <div class="row gap wrap">
           <button id="savePalette" type="button">Save current</button>
           <button id="clearSavedPalettes" type="button">Clear saved</button>
@@ -81,18 +110,21 @@
     <!-- 3) Mapping options -->
     <div class="card">
       <h2>3) Mapping options</h2>
+
       <div class="row">
         <label>Chroma weight
           <input type="range" id="wChroma" min="50" max="200" value="100">
         </label>
         <output id="wChromaOut">1.00×</output>
       </div>
+
       <div class="row">
         <label>Lightness weight
           <input type="range" id="wLight" min="50" max="200" value="100">
         </label>
         <output id="wLightOut">1.00×</output>
       </div>
+
       <div class="row wrap">
         <label class="chk"><input type="checkbox" id="useDither"> Floyd–Steinberg dithering</label>
         <label>Background
@@ -103,18 +135,46 @@
           </select>
         </label>
       </div>
+
+      <!-- Halftone dots block -->
+      <div class="card subtle">
+        <h3>Halftone (tiny dots)</h3>
+        <label class="chk">
+          <input type="checkbox" id="useHalftone">
+          Render as dots instead of pixels
+        </label>
+
+        <div class="row wrap">
+          <label>Dot cell size (px)
+            <input type="number" id="dotCell" value="6" min="3" max="64" step="1">
+          </label>
+          <label>Background
+            <input type="text" id="dotBg" value="#FFFFFF" placeholder="#RRGGBB">
+          </label>
+          <label class="chk">
+            <input type="checkbox" id="dotJitter">
+            Jitter positions slightly
+          </label>
+        </div>
+
+        <small>
+          Each cell becomes a dot of the nearest palette color, sized by coverage against the background.
+        </small>
+      </div>
+
       <div class="row gap wrap">
         <button id="applyBtn" type="button" disabled>Refresh with my color selection</button>
         <button id="downloadBtn" type="button" disabled>Download PNG</button>
+        <button id="openEditor" type="button">Open full-screen editor</button>
       </div>
     </div>
 
-    <!-- Region tool -->
+    <!-- Region tool (rectangle) -->
     <div class="card">
       <h2>Region tool (optional)</h2>
       <div class="row wrap">
-        <label class="chk"><input type="checkbox" id="regionMode"> Draw region (drag on Original)</label>
-        <button id="regionClear" type="button" class="ghost">Clear regions</button>
+        <label class="chk"><input type="checkbox" id="regionMode"> Draw rectangle region (drag on Original)</label>
+        <button id="regionClear" type="button" class="ghost">Clear all regions</button>
       </div>
       <div id="regionConfig" class="region-config" hidden>
         <h3>Region palette</h3>
@@ -123,6 +183,7 @@
           <button id="regionApply" type="button">Save region</button>
           <button id="regionCancel" type="button" class="ghost">Cancel</button>
         </div>
+        <small>Uncheck colors you do <em>not</em> want to appear in this rectangle.</small>
       </div>
     </div>
   </section>
@@ -131,14 +192,15 @@
     <div class="canvas-card">
       <h3>Original</h3>
       <div class="canvas-wrap">
-        <canvas id="srcCanvas" tabindex="0"></canvas>
+        <canvas id="srcCanvas" tabindex="0" aria-label="Original image preview"></canvas>
       </div>
       <small>Press & hold to pick a color (eyedropper), or ALT-click on desktop.</small>
     </div>
+
     <div class="canvas-card">
       <h3>Mapped</h3>
       <div class="canvas-wrap">
-        <canvas id="outCanvas" tabindex="0"></canvas>
+        <canvas id="outCanvas" tabindex="0" aria-label="Palette-mapped / halftoned image"></canvas>
       </div>
     </div>
   </section>
@@ -156,6 +218,36 @@
     <button id="eyeAdd" type="button">Add</button>
     <button id="eyeCancel" type="button" class="ghost">Cancel</button>
   </div>
+</div>
+
+<!-- Full-screen Editor Overlay -->
+<div id="editorOverlay" class="editor hidden" aria-hidden="true">
+  <div class="editor-left">
+    <div class="editor-toolbar">
+      <button id="toolEyedrop" type="button" class="tool active">Eyedropper</button>
+      <button id="toolLasso"   type="button" class="tool">Lasso</button>
+      <button id="toolPan"     type="button" class="tool">Pan</button>
+      <div class="spacer"></div>
+      <button id="editorDone"  type="button" class="ghost">Done</button>
+    </div>
+    <div class="editor-canvas-wrap">
+      <canvas id="editCanvas"></canvas>
+      <canvas id="editOverlay"></canvas>
+    </div>
+  </div>
+
+  <aside class="editor-right">
+    <h3>Palette</h3>
+    <div id="editorPalette" class="editor-palette"></div>
+    <hr>
+    <h3>Region palette (lasso)</h3>
+    <small>Uncheck colors you do <em>not</em> want in this lasso region.</small>
+    <div id="lassoChecks" class="editor-checks"></div>
+    <div class="row gap">
+      <button id="lassoSave" type="button" disabled>Save region</button>
+      <button id="lassoClear" type="button" class="ghost" disabled>Clear</button>
+    </div>
+  </aside>
 </div>
 
 <script src="app.js"></script>
