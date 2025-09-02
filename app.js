@@ -1,10 +1,18 @@
-/* Palette Mapper — Cup Print Helper (FULL JS)
-   v6.1 — Robust uploads (createImageBitmap fallback), Editor-first UX, Halftone, Auto 10-color palette
+/* Palette Mapper — Cup Print Helper (FULL JS, v7)
+   Features:
+   - Ultra-robust photo attach: Upload (Photo Library), Camera, Drag & Drop, Paste
+   - HEIC/HEIF detection + guidance; EXIF orientation for JPEG fallback
+   - Auto 10-color palette on load (k-means, frequency-ranked)
+   - Full-screen Editor (Eyedropper w/ preview, Lasso regions w/ per-region palette)
+   - Palette mapping in perceptual Lab + optional Floyd–Steinberg dithering
+   - Halftone dots rendering (cell size, jitter, background) + region support
+   - Projects via IndexedDB (save/export/import/delete) + Saved palettes via localStorage
+   - Mobile-friendly; non-passive pointer listeners to avoid iOS Safari highlights
 */
 
 /////////////////////////////// DOM ///////////////////////////////
 const els = {
-  // Image & canvases (main)
+  // Image & canvases
   fileInput: document.getElementById('fileInput'),
   cameraInput: document.getElementById('cameraInput'),
   pasteBtn: document.getElementById('pasteBtn'),
@@ -52,7 +60,7 @@ const els = {
   savePalette: document.getElementById('savePalette'),
   clearSavedPalettes: document.getElementById('clearSavedPalettes'),
 
-  // Legacy region card on main — hidden by JS
+  // Legacy region card (kept for IDs)
   regionCard: document.querySelector('.card h2')?.textContent?.toLowerCase().includes('region')
               ? document.querySelector('.card h2')?.closest('.card') : null,
   regionMode: document.getElementById('regionMode'),
@@ -72,19 +80,25 @@ const els = {
   lassoChecks: document.getElementById('lassoChecks'),
   lassoSave: document.getElementById('lassoSave'),
   lassoClear: document.getElementById('lassoClear'),
-
-  // Eyedropper preview (in editor sidebar)
   eyeSwatch: document.getElementById('eyeSwatch'),
   eyeHex: document.getElementById('eyeHex'),
   eyeAdd: document.getElementById('eyeAdd'),
   eyeCancel: document.getElementById('eyeCancel'),
 };
+
 const sctx = els.srcCanvas.getContext('2d', { willReadFrequently: true });
 const octx = els.outCanvas.getContext('2d', { willReadFrequently: true });
 
 /////////////////////////////// State ///////////////////////////////
-const state = { fullBitmap: null, fullW: 0, fullH: 0, selectedProjectId: null };
-const regions = []; // rect OR polygon
+const state = {
+  fullBitmap: null,     // ImageBitmap or HTMLImageElement (original file)
+  fullW: 0,
+  fullH: 0,
+  exifOrientation: 1,   // 1..8; 1=normal (only used in fallback path)
+  selectedProjectId: null
+};
+
+const regions = []; // lasso polygons or (legacy) rects
 /*
   Rect: { x0,y0,x1,y1, allowed:Set<number> }
   Poly: { type:'polygon', points:[[x,y]...](preview coords), mask:Uint8Array, allowed:Set<number> }
@@ -95,7 +109,9 @@ const editor = {
   eyedropTimer:null, currentHex:'#000000'
 };
 
-/////////////////////////////// Utils ///////////////////////////////
+/////////////////////////////// Constants & Utils ///////////////////////////////
+const MAX_PREVIEW_WIDTH = 2000;
+
 const clamp = (v, min, max) => (v < min ? min : (v > max ? max : v));
 const hexToRgb = (hex) => { let h=(hex||'').trim(); if(!h.startsWith('#')) h='#'+h; const m=/^#([0-9a-f]{6})$/i.exec(h); if(!m) return null; const n=parseInt(m[1],16); return {r:(n>>16)&255,g:(n>>8)&255,b:n&255}; };
 const rgbToHex = (r,g,b) => '#' + [r,g,b].map(v=>v.toString(16).padStart(2,'0')).join('').toUpperCase();
@@ -103,6 +119,7 @@ const fmtMult = n => (Number(n)/100).toFixed(2)+'×';
 const inRect = (x,y,r) => x>=r.x0 && x<=r.x1 && y>=r.y0 && y<=r.y1;
 const normalizeRect = r => ({ x0:Math.min(r.x0,r.x1), y0:Math.min(r.y0,r.y1), x1:Math.max(r.x0,r.x1), y1:Math.max(r.y0,r.y1) });
 const scaleRect = (r,sx,sy)=>({ x0:Math.floor(r.x0*sx), y0:Math.floor(r.y0*sy), x1:Math.floor(r.x1*sx), y1:Math.floor(r.y1*sy) });
+const getOrientedDims = (o, w, h) => ([5,6,7,8].includes(o) ? {w:h, h:w} : {w, h});
 
 /////////////////////////////// Storage ///////////////////////////////
 const LS_KEYS = { PALETTES:'pm_saved_palettes_v1', PREFS:'pm_prefs_v1' };
@@ -117,6 +134,81 @@ async function dbPutProject(rec){ const db=await openDB(); return new Promise((r
 async function dbGetAll(){ const db=await openDB(); return new Promise((res,rej)=>{ const tx=db.transaction(DB_STORE,'readonly'); const st=tx.objectStore(DB_STORE); const r=st.getAll(); r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); });}
 async function dbGet(id){ const db=await openDB(); return new Promise((res,rej)=>{ const tx=db.transaction(DB_STORE,'readonly'); const st=tx.objectStore(DB_STORE); const r=st.get(id); r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); });}
 async function dbDelete(id){ const db=await openDB(); return new Promise((res,rej)=>{ const tx=db.transaction(DB_STORE,'readwrite'); const st=tx.objectStore(DB_STORE); const r=st.delete(id); r.onsuccess=()=>res(); r.onerror=()=>rej(r.error); });}
+
+/////////////////////////////// HEIC & EXIF helpers ///////////////////////////////
+function isHeicFile(file) {
+  const name = (file.name || '').toLowerCase();
+  const type = (file.type || '').toLowerCase();
+  return name.endsWith('.heic') || name.endsWith('.heif') || type.includes('heic') || type.includes('heif');
+}
+function heicNotSupportedMessage() {
+  alert(
+`This photo appears to be HEIC/HEIF, which this browser can't decode into canvas.
+
+Use a JPG/PNG, or on iPhone set: Settings → Camera → Formats → “Most Compatible”.`
+  );
+}
+function isLikelyJpeg(file){
+  const t=(file.type||'').toLowerCase();
+  const ext=(file.name||'').split('.').pop().toLowerCase();
+  return t.includes('jpeg') || t.includes('jpg') || ext==='jpg' || ext==='jpeg';
+}
+// Minimal EXIF orientation parse (returns 1..8; 1 if unknown)
+async function readJpegOrientation(file){
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = function() {
+      try {
+        const view = new DataView(reader.result);
+        if (view.getUint16(0, false) !== 0xFFD8) return resolve(1);
+        let offset = 2; const length = view.byteLength;
+        while (offset < length) {
+          const marker = view.getUint16(offset, false); offset += 2;
+          if (marker === 0xFFE1) { // APP1
+            const exifLength = view.getUint16(offset, false); offset += 2;
+            if (view.getUint32(offset, false) !== 0x45786966) break; // "Exif"
+            offset += 6;
+            const tiffOffset = offset;
+            const little = view.getUint16(tiffOffset, false) === 0x4949;
+            const get16 = (o) => view.getUint16(o, little);
+            const get32 = (o) => view.getUint32(o, little);
+            const firstIFD = get32(tiffOffset + 4);
+            if (firstIFD < 8) return resolve(1);
+            const dir = tiffOffset + firstIFD;
+            const entries = get16(dir);
+            for (let i=0;i<entries;i++){
+              const e = dir + 2 + i*12;
+              const tag = get16(e);
+              if (tag === 0x0112) { // Orientation
+                return resolve(get16(e+8) || 1);
+              }
+            }
+          } else if ((marker & 0xFF00) !== 0xFF00) break;
+          else offset += view.getUint16(offset, false);
+        }
+      } catch {}
+      resolve(1);
+    };
+    reader.onerror = () => resolve(1);
+    reader.readAsArrayBuffer(file.slice(0,256*1024));
+  });
+}
+function drawImageWithOrientation(ctx, img, targetW, targetH, orientation){
+  // Canvas must already be sized to oriented dims outside
+  ctx.save();
+  switch (orientation) {
+    case 2: ctx.translate(targetW,0); ctx.scale(-1,1); break;
+    case 3: ctx.translate(targetW,targetH); ctx.rotate(Math.PI); break;
+    case 4: ctx.translate(0,targetH); ctx.scale(1,-1); break;
+    case 5: ctx.rotate(0.5*Math.PI); ctx.scale(1,-1); break;
+    case 6: ctx.rotate(0.5*Math.PI); ctx.translate(0,-targetW); break;
+    case 7: ctx.rotate(0.5*Math.PI); ctx.translate(targetH,-targetW); ctx.scale(-1,1); break;
+    case 8: ctx.rotate(-0.5*Math.PI); ctx.translate(-targetH,0); break;
+    default: break;
+  }
+  ctx.drawImage(img, 0, 0, targetW, targetH);
+  ctx.restore();
+}
 
 /////////////////////////////// Palette UI ///////////////////////////////
 function addPaletteRow(hex='#FFFFFF'){
@@ -156,49 +248,30 @@ function renderSavedPalettes(){
   });
 }
 
-/////////////////////////////// Image load/preview ///////////////////////////////
-/* Robust loader: try createImageBitmap; fallback to <img> + ObjectURL if it fails */
-async function handleFile(file){
-  if(!file){ return; }
-  try{
-    if (typeof createImageBitmap === 'function') {
-      try {
-        const bmp = await createImageBitmap(file);
-        state.fullBitmap=bmp; state.fullW=bmp.width; state.fullH=bmp.height;
-        drawSrc(bmp); toggleImageActions(true); return;
-      } catch (e) {
-        console.warn('createImageBitmap failed, falling back to Image()', e);
-      }
-    }
-    // Fallback: use Image + object URL
-    const url = URL.createObjectURL(file);
-    const img = await loadImage(url);
-    state.fullBitmap = img; state.fullW = img.naturalWidth || img.width; state.fullH = img.naturalHeight || img.height;
-    drawSrc(img); toggleImageActions(true);
-    URL.revokeObjectURL(url);
-  } catch (err){
-    console.error('Image load error:', err);
-    alert('Could not open that image. Try a different file or take a new photo.');
+/////////////////////////////// Image preview + auto-palette ///////////////////////////////
+function drawPreviewFromState(){
+  const bmp = state.fullBitmap; if(!bmp) return;
+  let w = bmp.width || bmp.naturalWidth, h = bmp.height || bmp.naturalHeight;
+  // orientation may swap preview dims in fallback path
+  const orient = state.exifOrientation || 1;
+  ({w, h} = getOrientedDims(orient, w, h));
+  if (w > MAX_PREVIEW_WIDTH) { const s = MAX_PREVIEW_WIDTH / w; w=Math.round(w*s); h=Math.round(h*s); }
+  els.srcCanvas.width = w; els.srcCanvas.height = h;
+  sctx.clearRect(0,0,w,h);
+
+  if (orient === 1 && bmp instanceof ImageBitmap) {
+    sctx.drawImage(bmp,0,0,w,h);
+  } else {
+    // Apply orientation transform for preview when needed or using <img>
+    drawImageWithOrientation(sctx, bmp, w, h, orient);
   }
-}
-function loadImage(url){
-  return new Promise((resolve,reject)=>{
-    const img=new Image(); img.decoding='async'; img.onload=()=>resolve(img); img.onerror=reject; img.src=url;
-  });
-}
 
-function drawSrc(bmp){
-  const mW=parseInt(els.maxW.value||'1400',10);
-  let w=bmp.width||bmp.naturalWidth, h=bmp.height||bmp.naturalHeight;
-  if(w>mW){ const s=mW/w; w=Math.round(w*s); h=Math.round(h*s); }
-  els.srcCanvas.width=w; els.srcCanvas.height=h;
-  sctx.clearRect(0,0,w,h); sctx.drawImage(bmp,0,0,w,h);
+  els.outCanvas.width = w; els.outCanvas.height = h;
+  octx.clearRect(0,0,w,h);
+  els.downloadBtn.disabled = true;
 
-  els.outCanvas.width=w; els.outCanvas.height=h; octx.clearRect(0,0,w,h);
-  els.downloadBtn.disabled=true;
-
-  // Auto-build a 10-color palette (async tick, guarded)
-  setTimeout(() => { try { autoPaletteFromCanvas(els.srcCanvas, 10); } catch(e){ console.warn('autoPaletteFromCanvas failed', e); } }, 0);
+  // Auto 10-color palette
+  setTimeout(() => { try { autoPaletteFromCanvas(els.srcCanvas, 10); } catch(e){ console.warn('autoPalette failed', e); } }, 0);
 }
 function toggleImageActions(enable){
   els.applyBtn.disabled=!enable;
@@ -206,7 +279,58 @@ function toggleImageActions(enable){
   els.resetBtn.disabled=!enable;
 }
 
-/////////////////////////////// Color math ///////////////////////////////
+/////////////////////////////// Robust Attachment ///////////////////////////////
+function objectUrlFor(file){ return URL.createObjectURL(file); }
+function revokeUrl(url){ try{ URL.revokeObjectURL(url); }catch{} }
+
+function loadImage(url){
+  return new Promise((resolve,reject)=>{
+    const img=new Image(); img.decoding='async';
+    img.onload=()=>resolve(img); img.onerror=(e)=>reject(e);
+    img.src=url;
+  });
+}
+
+async function handleFile(file, source='file'){
+  try{
+    if(!file) return;
+
+    if (isHeicFile(file)) { heicNotSupportedMessage(); return; }
+
+    state.exifOrientation = 1;
+
+    if (typeof createImageBitmap === 'function') {
+      try{
+        const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+        state.fullBitmap = bmp; state.fullW = bmp.width; state.fullH = bmp.height; state.exifOrientation = 1;
+        drawPreviewFromState(); toggleImageActions(true); return;
+      }catch(e){ console.warn('createImageBitmap failed:', e); }
+    }
+
+    // Fallback: <img> + EXIF orientation for JPEG
+    const url = objectUrlFor(file);
+    try{
+      const img = await loadImage(url);
+      state.fullBitmap = img;
+      state.fullW = img.naturalWidth || img.width; state.fullH = img.naturalHeight || img.height;
+      if (isLikelyJpeg(file)) {
+        try { state.exifOrientation = await readJpegOrientation(file); } catch {}
+      } else { state.exifOrientation = 1; }
+      drawPreviewFromState(); toggleImageActions(true);
+    } finally {
+      revokeUrl(url);
+    }
+  } catch(err){
+    console.error('Image load error:', err);
+    alert('Could not open that image. Try a JPG/PNG or a different photo.');
+  } finally {
+    // allow re-selecting same file
+    if (els.fileInput) els.fileInput.value = '';
+    if (els.cameraInput) els.cameraInput.value = '';
+  }
+}
+
+/////////////////////////////// Color math (sRGB → Lab) ///////////////////////////////
 function srgbToLinear(u){ u/=255; return (u<=0.04045)? u/12.92 : Math.pow((u+0.055)/1.055,2.4); }
 function rgbToXyz(r,g,b){ r=srgbToLinear(r); g=srgbToLinear(g); b=srgbToLinear(b);
   const x=r*0.4124564 + g*0.3575761 + b*0.1804375;
@@ -220,7 +344,7 @@ function rgbToLab(r,g,b){ const [x,y,z]=rgbToXyz(r,g,b); return xyzToLab(x,y,z);
 function deltaE2Weighted(l1,l2,wL,wC){ const dL=l1[0]-l2[0], da=l1[1]-l2[1], db=l1[2]-l2[2]; return wL*dL*dL + wC*(da*da+db*db); }
 function buildPaletteLab(pal){ return pal.map(([r,g,b])=>({ rgb:[r,g,b], lab:rgbToLab(r,g,b) })); }
 
-/////////////////////////////// Mapping ///////////////////////////////
+/////////////////////////////// Mapping (palette or halftone) ///////////////////////////////
 function mapToPalette(imgData, palette, wL=1.0, wC=1.0, dither=false, bgMode='keep', effRegions=[]){
   const w=imgData.width, h=imgData.height, src=imgData.data;
   const out=new ImageData(w,h); out.data.set(src);
@@ -243,7 +367,6 @@ function mapToPalette(imgData, palette, wL=1.0, wC=1.0, dither=false, bgMode='ke
       let r=out.data[i4], g=out.data[i4+1], b=out.data[i4+2];
       if(dither){ r=clamp(Math.round(r+errR[idx]),0,255); g=clamp(Math.round(g+errG[idx]),0,255); b=clamp(Math.round(b+errB[idx]),0,255); }
 
-      // Region restriction (last wins)
       let allowedSet=null;
       if(effRegions && effRegions.length){
         for(let ri=effRegions.length-1; ri>=0; ri--){
@@ -276,7 +399,7 @@ function mapToPalette(imgData, palette, wL=1.0, wC=1.0, dither=false, bgMode='ke
   return out;
 }
 
-/////////////////////////////// Halftone ///////////////////////////////
+// Halftone helpers
 function avgColorInCell(data, w, h, x0, y0, sz) {
   let r=0,g=0,b=0,a=0,count=0;
   const x1=Math.min(w, x0+sz), y1=Math.min(h, y0+sz);
@@ -342,7 +465,7 @@ function renderHalftone(ctx, imgData, palette, bgHex, cellSize=6, jitter=false, 
   ctx.restore();
 }
 
-/////////////////////////////// K-means ///////////////////////////////
+/////////////////////////////// K-means + Auto Palette ///////////////////////////////
 function kmeans(data,k=5,iters=10){
   const n=data.length/4;
   const centers=[]; for(let c=0;c<k;c++){ const idx=Math.floor((c+0.5)*n/k); centers.push([data[idx*4],data[idx*4+1],data[idx*4+2]]); }
@@ -360,8 +483,6 @@ function kmeans(data,k=5,iters=10){
   }
   return centers;
 }
-
-/////////////////////////////// Auto Palette (10 colors) ///////////////////////////////
 function sampleImageDataForClustering(ctx, w, h, targetPixels = 120000) {
   const step = Math.max(1, Math.floor(Math.sqrt((w * h) / targetPixels)));
   const outW = Math.floor(w / step), outH = Math.floor(h / step);
@@ -407,18 +528,7 @@ async function autoPaletteFromCanvas(canvas, k = 10) {
   setPalette(hexes);
 }
 
-//////////////////// Desktop-only alt-click sampler ////////////////////
-(function desktopAltClickSampler(){
-  els.srcCanvas.addEventListener('click',(evt)=>{
-    if(!evt.altKey) return;
-    const rect=els.srcCanvas.getBoundingClientRect();
-    const x=Math.floor((evt.clientX-rect.left)*els.srcCanvas.width/rect.width);
-    const y=Math.floor((evt.clientY-rect.top )*els.srcCanvas.height/rect.height);
-    const d=sctx.getImageData(x,y,1,1).data; addPaletteRow(rgbToHex(d[0],d[1],d[2]));
-  });
-})();
-
-/////////////////////////////// Full-screen Editor ///////////////////////////////
+/////////////////////////////// Editor (full-screen) ///////////////////////////////
 function setToolActive(id){ ['toolEyedrop','toolLasso','toolPan'].forEach(x=>{ const b=document.getElementById(x); if(!b) return; (x===id)? b.classList.add('active'):b.classList.remove('active'); }); }
 function renderEditorPalette(){
   if(!els.editorPalette) return; els.editorPalette.innerHTML='';
@@ -432,30 +542,24 @@ function buildLassoChecks(){
     els.lassoChecks.appendChild(label);
   });
 }
-
 function openEditor(){
   if(!state.fullBitmap){ alert('Load an image first.'); return; }
-  els.editorOverlay?.classList.remove('hidden'); els.editorOverlay?.setAttribute('aria-hidden','false'); 
-  editor.active=true;
+  els.editorOverlay?.classList.remove('hidden'); els.editorOverlay?.setAttribute('aria-hidden','false'); editor.active=true;
 
-  // Fit canvases to viewport
   const vw=window.innerWidth, vh=window.innerHeight; const rightW=(vw>900)?320:0, toolbarH=50;
   els.editCanvas.width=vw-rightW; els.editCanvas.height=vh-toolbarH;
   els.editOverlay.width=els.editCanvas.width; els.editOverlay.height=els.editCanvas.height;
   editor.ectx=els.editCanvas.getContext('2d',{willReadFrequently:true});
   editor.octx=els.editOverlay.getContext('2d',{willReadFrequently:true});
 
-  // Draw preview image into editor
+  // Draw the current preview into editor space
   editor.ectx.clearRect(0,0,els.editCanvas.width,els.editCanvas.height);
   editor.ectx.drawImage(els.srcCanvas,0,0,els.editCanvas.width,els.editCanvas.height);
 
-  // Reset tools/UI
   editor.tool='eyedrop'; setToolActive('toolEyedrop');
   editor.lassoPts=[]; editor.lassoActive=false; drawLassoStroke(false);
   editor.eyedropTimer=null; editor.currentHex='#000000';
   renderEditorPalette(); buildLassoChecks();
-
-  // Activate eyedropper
   enableEditorEyedrop();
 }
 function closeEditor(){
@@ -467,9 +571,8 @@ els.openEditor?.addEventListener('click', openEditor);
 els.editorDone?.addEventListener('click', closeEditor);
 els.toolEyedrop?.addEventListener('click', ()=>{ editor.tool='eyedrop'; setToolActive('toolEyedrop'); disableEditorLasso(); enableEditorEyedrop(); });
 els.toolLasso?.addEventListener('click', ()=>{ editor.tool='lasso'; setToolActive('toolLasso'); disableEditorEyedrop(); enableEditorLasso(); });
-els.toolPan?.addEventListener('click', ()=>{ editor.tool='pan'; setToolActive('toolPan'); disableEditorEyedrop(); disableEditorLasso(); /* reserved */ });
+els.toolPan?.addEventListener('click', ()=>{ editor.tool='pan'; setToolActive('toolPan'); disableEditorEyedrop(); disableEditorLasso(); });
 
-/* Eyedropper (non-passive + preventDefault) */
 function pickAtEditor(evt){
   const rect=els.editCanvas.getBoundingClientRect();
   const x=Math.floor((evt.clientX-rect.left)*els.editCanvas.width/rect.width);
@@ -499,10 +602,8 @@ function disableEditorEyedrop(){
   els.editCanvas.removeEventListener('pointermove', eyedropMove);
   ['pointerup','pointerleave','pointercancel'].forEach(ev=>els.editCanvas.removeEventListener(ev, eyedropEnd));
 }
-els.eyeAdd?.addEventListener('click', ()=>{ addPaletteRow(editor.currentHex); renderEditorPalette(); buildLassoChecks(); });
-els.eyeCancel?.addEventListener('click', ()=>{ editor.octx?.clearRect(0,0,els.editOverlay.width,els.editOverlay.height); });
 
-/* Lasso (freehand polygon) */
+// Lasso
 function enableEditorLasso(){
   els.lassoSave.disabled=true; els.lassoClear.disabled=false;
   els.editCanvas.addEventListener('pointerdown', lassoBegin, {passive:false});
@@ -553,46 +654,64 @@ els.lassoSave?.addEventListener('click', ()=>{
   editor.lassoPts=[]; drawLassoStroke(false); els.lassoSave.disabled=true; els.lassoClear.disabled=true;
 });
 
-/////////////////////////////// Actions/UI ///////////////////////////////
+/////////////////////////////// UI Actions ///////////////////////////////
 function updateWeightsUI(){ if(els.wChromaOut) els.wChromaOut.textContent=fmtMult(els.wChroma.value); if(els.wLightOut) els.wLightOut.textContent=fmtMult(els.wLight.value); }
-function bindEvents(){
-  // Uploads
-  els.fileInput?.addEventListener('change', e=>{ const f=e.target.files?.[0]; if(f) handleFile(f); });
-  els.cameraInput?.addEventListener('change', e=>{ const f=e.target.files?.[0]; if(f) handleFile(f); });
 
-  // Clipboard paste (desktop)
+function bindEvents(){
+  // Upload inputs
+  els.fileInput?.addEventListener('change', e=>{ const f=e.target.files?.[0]; if(f) handleFile(f,'file'); });
+  els.cameraInput?.addEventListener('change', e=>{ const f=e.target.files?.[0]; if(f) handleFile(f,'camera'); });
+
+  // Drag & Drop (desktop)
+  const prevent=(e)=>{ e.preventDefault(); e.stopPropagation(); };
+  ['dragenter','dragover','dragleave','drop'].forEach(ev=>{
+    window.addEventListener(ev, prevent, { passive:false });
+  });
+  window.addEventListener('drop', (e)=>{
+    const dt=e.dataTransfer; const f=dt && dt.files && dt.files[0];
+    if(f) handleFile(f,'drop');
+  }, { passive:false });
+
+  // Paste button (desktop: requires user gesture)
   els.pasteBtn?.addEventListener('click', async ()=>{
     if(!navigator.clipboard || !navigator.clipboard.read){ alert('Clipboard image paste not supported on this browser. Use Upload instead.'); return; }
     try{
       const items=await navigator.clipboard.read();
-      for(const item of items){ for(const type of item.types){ if(type.startsWith('image/')){ const blob=await item.getType(type); await handleFile(blob); return; } } }
+      for(const item of items){ for(const type of item.types){ if(type.startsWith('image/')){ const blob=await item.getType(type); await handleFile(blob,'paste'); return; } } }
       alert('No image in clipboard.');
     }catch{ alert('Clipboard read failed. Try Upload instead.'); }
   });
 
-  els.resetBtn?.addEventListener('click', ()=>{ if(!state.fullBitmap) return; drawSrc(state.fullBitmap); });
+  // Also support Ctrl+V paste
+  document.addEventListener('paste', async (e)=>{
+    try{
+      let file=null;
+      if(e.clipboardData && e.clipboardData.items){
+        for(const it of e.clipboardData.items){ if(it.type && it.type.startsWith('image/')){ file=it.getAsFile(); break; } }
+      }
+      if(file){ e.preventDefault(); await handleFile(file,'paste'); }
+    }catch(err){ console.warn('paste error',err); }
+  });
 
-  els.maxW?.addEventListener('change', ()=>{ if(state.fullBitmap) drawSrc(state.fullBitmap); });
+  // Reset/preview resize
+  els.resetBtn?.addEventListener('click', ()=>{ if(!state.fullBitmap) return; drawPreviewFromState(); });
+  els.maxW?.addEventListener('change', ()=>{ if(state.fullBitmap) drawPreviewFromState(); });
 
   // Palette
   els.addColor?.addEventListener('click', ()=>addPaletteRow('#FFFFFF'));
   els.clearColors?.addEventListener('click', ()=>{ els.paletteList.innerHTML=''; });
   els.loadExample?.addEventListener('click', ()=>{ setPalette(['#FFFFFF','#B3753B','#5B3A21','#D22C2C','#1D6E2E']); });
-
-  // Saved palettes controls (were missing listeners in v6)
   els.savePalette?.addEventListener('click', ()=>{
-    const name = prompt('Save palette as (optional name):') || `Palette ${Date.now()}`;
-    const colors = getPalette().map(([r,g,b])=>rgbToHex(r,g,b));
-    const list = loadSavedPalettes(); list.unshift({ name, colors });
-    saveSavedPalettes(list.slice(0,50)); // keep last 50
-    renderSavedPalettes();
+    const name=prompt('Save palette as (optional name):') || `Palette ${Date.now()}`;
+    const colors=getPalette().map(([r,g,b])=>rgbToHex(r,g,b));
+    const list=loadSavedPalettes(); list.unshift({name, colors});
+    saveSavedPalettes(list.slice(0,50)); renderSavedPalettes();
   });
   els.clearSavedPalettes?.addEventListener('click', ()=>{
-    if(!confirm('Clear all saved palettes?')) return;
-    saveSavedPalettes([]); renderSavedPalettes();
+    if(!confirm('Clear all saved palettes?')) return; saveSavedPalettes([]); renderSavedPalettes();
   });
 
-  // Manual auto-extract button
+  // Manual extractor
   els.autoExtract?.addEventListener('click', ()=>{
     if(!els.srcCanvas.width){ alert('Load an image first.'); return; }
     const k=clamp(parseInt(els.kColors.value||'5',10),2,16);
@@ -600,7 +719,7 @@ function bindEvents(){
     const centers=kmeans(img.data,k,10); setPalette(centers.map(([r,g,b])=>rgbToHex(r,g,b)));
   });
 
-  // Slider outputs
+  // Weights out
   ['input','change'].forEach(ev=>{ els.wChroma?.addEventListener(ev, updateWeightsUI); els.wLight?.addEventListener(ev, updateWeightsUI); });
 
   // Apply mapping
@@ -609,20 +728,32 @@ function bindEvents(){
     const wL=parseInt(els.wLight.value,10)/100, wC=parseInt(els.wChroma.value,10)/100;
     const dither=!!els.useDither.checked, bgMode=els.bgMode.value;
 
-    let procCanvas=els.srcCanvas, usingFull=false;
+    // Build processing canvas (preview or full res)
+    let procCanvas, pctx, usingFull=false;
     if(els.keepFullRes.checked && state.fullBitmap){
-      procCanvas=document.createElement('canvas'); procCanvas.width=state.fullW; procCanvas.height=state.fullH;
-      procCanvas.getContext('2d',{willReadFrequently:true}).drawImage(state.fullBitmap,0,0); usingFull=true;
+      usingFull=true;
+      // Oriented full-res dims
+      const baseW=state.fullW, baseH=state.fullH, o=state.exifOrientation||1;
+      const {w:ow, h:oh} = getOrientedDims(o, baseW, baseH);
+      procCanvas=document.createElement('canvas'); procCanvas.width=ow; procCanvas.height=oh;
+      pctx=procCanvas.getContext('2d',{willReadFrequently:true});
+      if (o===1 && state.fullBitmap instanceof ImageBitmap){
+        pctx.drawImage(state.fullBitmap,0,0,ow,oh);
+      } else {
+        drawImageWithOrientation(pctx, state.fullBitmap, ow, oh, o);
+      }
+    } else {
+      procCanvas=els.srcCanvas; pctx=procCanvas.getContext('2d',{willReadFrequently:true});
     }
 
-    // Build effective regions
+    // Effective regions (scale to full if needed)
     let effectiveRegions=[];
     if(regions.length){
       if(usingFull){
-        const sx=state.fullW/els.srcCanvas.width, sy=state.fullH/els.srcCanvas.height;
+        const sx=procCanvas.width/els.srcCanvas.width, sy=procCanvas.height/els.srcCanvas.height;
         effectiveRegions = regions.map(r=>{
           if(r.type==='polygon'){
-            const full=scaleMask(r.mask, els.srcCanvas.width, els.srcCanvas.height, state.fullW, state.fullH);
+            const full=scaleMask(r.mask, els.srcCanvas.width, els.srcCanvas.height, procCanvas.width, procCanvas.height);
             return { type:'polygon', mask:full, allowed:r.allowed };
           } else { return { ...scaleRect(normalizeRect(r), sx, sy), allowed:r.allowed }; }
         });
@@ -631,38 +762,40 @@ function bindEvents(){
       }
     }
 
-    const ctx=procCanvas.getContext('2d',{willReadFrequently:true});
-
     if (els.useHalftone?.checked) {
-      ctx.clearRect(0,0,procCanvas.width,procCanvas.height);
-      if (usingFull) ctx.drawImage(state.fullBitmap,0,0); else ctx.drawImage(els.srcCanvas,0,0);
-      const srcData = ctx.getImageData(0,0,procCanvas.width,procCanvas.height);
-
+      const srcData = pctx.getImageData(0,0,procCanvas.width,procCanvas.height);
       const cell=clamp(parseInt(els.dotCell?.value||'6',10),3,64);
       const bgHex=(els.dotBg?.value||'#FFFFFF').toUpperCase();
       const jitter=!!els.dotJitter?.checked;
 
-      ctx.clearRect(0,0,procCanvas.width,procCanvas.height);
-      renderHalftone(ctx, srcData, pal, bgHex, cell, jitter, wL, wC, effectiveRegions);
+      pctx.clearRect(0,0,procCanvas.width,procCanvas.height);
+      renderHalftone(pctx, srcData, pal, bgHex, cell, jitter, wL, wC, effectiveRegions);
 
-      const outData=ctx.getImageData(0,0,procCanvas.width,procCanvas.height);
       if(usingFull){
-        const previewW=Math.min(state.fullW, parseInt(els.maxW.value,10)); const scale=previewW/state.fullW;
-        els.outCanvas.width=Math.round(state.fullW*scale); els.outCanvas.height=Math.round(state.fullH*scale);
+        // Show scaled preview of full-res
+        const previewW=Math.min(procCanvas.width, parseInt(els.maxW.value,10));
+        const scale=previewW/procCanvas.width;
+        els.outCanvas.width=Math.round(procCanvas.width*scale); els.outCanvas.height=Math.round(procCanvas.height*scale);
         octx.clearRect(0,0,els.outCanvas.width,els.outCanvas.height);
         octx.drawImage(procCanvas,0,0,els.outCanvas.width,els.outCanvas.height);
-      } else { els.outCanvas.width=outData.width; els.outCanvas.height=outData.height; octx.putImageData(outData,0,0); }
-      els.outCanvas._fullImageData = outData; els.downloadBtn.disabled=false; return;
+        els.outCanvas._fullImageData = pctx.getImageData(0,0,procCanvas.width,procCanvas.height);
+      } else {
+        const outData=pctx.getImageData(0,0,procCanvas.width,procCanvas.height);
+        els.outCanvas.width=outData.width; els.outCanvas.height=outData.height; octx.putImageData(outData,0,0);
+        els.outCanvas._fullImageData = outData;
+      }
+      els.downloadBtn.disabled=false; return;
     }
 
     // Pixel mapping path
-    const imgData=ctx.getImageData(0,0,procCanvas.width,procCanvas.height);
+    const imgData=pctx.getImageData(0,0,procCanvas.width,procCanvas.height);
     const out=mapToPalette(imgData,pal,wL,wC,dither,bgMode,effectiveRegions);
 
     if(usingFull){
-      const previewW=Math.min(state.fullW, parseInt(els.maxW.value,10)); const scale=previewW/state.fullW;
-      els.outCanvas.width=Math.round(state.fullW*scale); els.outCanvas.height=Math.round(state.fullH*scale);
-      const off=(typeof OffscreenCanvas!=='undefined')? new OffscreenCanvas(state.fullW,state.fullH) : Object.assign(document.createElement('canvas'),{width:state.fullW,height:state.fullH});
+      const previewW=Math.min(procCanvas.width, parseInt(els.maxW.value,10));
+      const scale=previewW/procCanvas.width;
+      els.outCanvas.width=Math.round(procCanvas.width*scale); els.outCanvas.height=Math.round(procCanvas.height*scale);
+      const off=(typeof OffscreenCanvas!=='undefined')? new OffscreenCanvas(procCanvas.width,procCanvas.height) : Object.assign(document.createElement('canvas'),{width:procCanvas.width,height:procCanvas.height});
       const offCtx=off.getContext('2d'); offCtx.putImageData(out,0,0);
       let bmp; if(off.convertToBlob){ const blob=await off.convertToBlob(); bmp=await createImageBitmap(blob); } else { const blob=await new Promise(res=>off.toBlob(res)); bmp=await createImageBitmap(blob); }
       octx.clearRect(0,0,els.outCanvas.width,els.outCanvas.height); octx.drawImage(bmp,0,0,els.outCanvas.width,els.outCanvas.height);
@@ -673,7 +806,7 @@ function bindEvents(){
     els.downloadBtn.disabled=false;
   });
 
-  // Download
+  // Download PNG (full-res if available)
   els.downloadBtn?.addEventListener('click', ()=>{
     const out=els.outCanvas._fullImageData;
     if(!out){
@@ -686,7 +819,7 @@ function bindEvents(){
     c.toBlob(blob=>{ const a=document.createElement('a'); a.download='mapped.png'; a.href=URL.createObjectURL(blob); a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),2000); }, 'image/png');
   });
 
-  // Projects
+  // Projects pane & actions
   els.openProjects?.addEventListener('click', ()=>setPane(true));
   els.closeProjects?.addEventListener('click', ()=>setPane(false));
   els.refreshProjects?.addEventListener('click', refreshProjectsList);
@@ -694,8 +827,14 @@ function bindEvents(){
   els.saveProject?.addEventListener('click', async ()=>{
     if(!state.fullBitmap){ alert('Load an image first.'); return; }
     const name=prompt('Project name?')||`Project ${Date.now()}`;
-    // Draw full bitmap into a canvas
-    const tmp=document.createElement('canvas'); tmp.width=state.fullW; tmp.height=state.fullH; tmp.getContext('2d').drawImage(state.fullBitmap,0,0);
+
+    // Save original image as PNG (draw oriented to preserve look)
+    const o=state.exifOrientation||1;
+    const {w:ow,h:oh}=getOrientedDims(o,state.fullW,state.fullH);
+    const tmp=document.createElement('canvas'); tmp.width=ow; tmp.height=oh; const tc=tmp.getContext('2d');
+    if (o===1 && state.fullBitmap instanceof ImageBitmap) tc.drawImage(state.fullBitmap,0,0,ow,oh);
+    else drawImageWithOrientation(tc, state.fullBitmap, ow, oh, o);
+
     const blob=await new Promise(res=>tmp.toBlob(res,'image/png',0.92));
     const rec={ id: state.selectedProjectId||undefined, name, createdAt:Date.now(), updatedAt:Date.now(), settings:getCurrentSettings(), imageBlob:blob };
     const id=await dbPutProject(rec); state.selectedProjectId=id; await refreshProjectsList(); alert('Saved.');
@@ -724,6 +863,15 @@ function bindEvents(){
     const id=state.selectedProjectId; if(!id){ alert('Select a project then Delete.'); return; }
     if(!confirm('Delete selected project?')) return; await dbDelete(id); state.selectedProjectId=null; await refreshProjectsList();
   });
+
+  // Desktop alt-click sampler on the preview
+  els.srcCanvas.addEventListener('click',(evt)=>{
+    if(!evt.altKey) return;
+    const rect=els.srcCanvas.getBoundingClientRect();
+    const x=Math.floor((evt.clientX-rect.left)*els.srcCanvas.width/rect.width);
+    const y=Math.floor((evt.clientY-rect.top )*els.srcCanvas.height/rect.height);
+    const d=sctx.getImageData(x,y,1,1).data; addPaletteRow(rgbToHex(d[0],d[1],d[2]));
+  });
 }
 
 /////////////////////////////// Settings & Persistence ///////////////////////////////
@@ -736,12 +884,10 @@ function getCurrentSettings(){
     wLight: parseInt(els.wLight.value,10),
     useDither: !!els.useDither.checked,
     bgMode: els.bgMode.value,
-    // halftone
     useHalftone: !!els.useHalftone?.checked,
     dotCell: parseInt(els.dotCell?.value||'6',10),
     dotBg: els.dotBg?.value || '#FFFFFF',
     dotJitter: !!els.dotJitter?.checked,
-    // regions
     regions: regions.map(r=>{
       if(r.type==='polygon'){ return { type:'polygon', points:r.points, allowed:Array.from(r.allowed) }; }
       return { type:'rect', x0:r.x0,y0:r.y0,x1:r.x1,y1:r.y1, allowed:Array.from(r.allowed) };
@@ -772,15 +918,15 @@ function applySettings(s){
 }
 async function loadProject(id){
   const rec=await dbGet(id); if(!rec){ alert('Project not found.'); return; }
-  // Robust load from Blob via Image() to avoid createImageBitmap issues
+  // Load from Blob, treat as normal image (PNG we saved already oriented)
   const url = URL.createObjectURL(rec.imageBlob);
   const img = await loadImage(url);
   URL.revokeObjectURL(url);
-  state.fullBitmap=img; state.fullW=img.naturalWidth||img.width; state.fullH=img.naturalHeight||img.height;
-  drawSrc(img); toggleImageActions(true); applySettings(rec.settings); state.selectedProjectId=id;
+  state.fullBitmap=img; state.fullW=img.naturalWidth||img.width; state.fullH=img.naturalHeight||img.height; state.exifOrientation=1;
+  drawPreviewFromState(); toggleImageActions(true); applySettings(rec.settings); state.selectedProjectId=id;
 }
 
-/////////////////////////////// Blobs ///////////////////////////////
+/////////////////////////////// Blob utils ///////////////////////////////
 function blobToBase64(blob){ return new Promise(res=>{ const r=new FileReader(); r.onload=()=>res(r.result.split(',')[1]); r.readAsDataURL(blob); }); }
 function base64ToBlob(b64){ const byteChars=atob(b64); const len=byteChars.length; const bytes=new Uint8Array(len); for(let i=0;i<len;i++) bytes[i]=byteChars.charCodeAt(i); return new Blob([bytes],{type:'image/png'}); }
 
@@ -800,7 +946,7 @@ async function refreshProjectsList(){
 /////////////////////////////// Init ///////////////////////////////
 function init(){
   try{
-    // Hide/disable legacy region UI on main page
+    // Hide legacy region UI on main page
     if(els.regionCard) els.regionCard.style.display='none';
     if(els.regionMode){ els.regionMode.checked=false; els.regionMode.disabled=true; }
     if(els.regionClear){ els.regionClear.disabled=true; }
@@ -820,7 +966,6 @@ function init(){
     if(prefs.dotJitter!==undefined) els.dotJitter.checked=!!prefs.dotJitter;
     updateWeightsUI(); renderSavedPalettes();
 
-    // Save prefs when relevant controls change
     const savePrefsNow=()=>savePrefs({
       lastPalette: getPalette().map(([r,g,b])=>rgbToHex(r,g,b)),
       keepFullRes: els.keepFullRes.checked,
@@ -846,9 +991,7 @@ function init(){
 
     refreshProjectsList();
     toggleImageActions(!!state.fullBitmap);
-  }catch(e){
-    console.error('Init error:', e);
-  }
+  }catch(e){ console.error('Init error:', e); }
 }
 
 bindEvents();
