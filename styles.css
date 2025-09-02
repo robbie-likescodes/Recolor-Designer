@@ -130,7 +130,7 @@ canvas{max-width:100%;height:auto;background:transparent;display:block}
 }
 .panecontent{padding:12px}
 
-/* Region tool */
+/* Region tool (rectangle) */
 .region-config{
   margin-top:8px;background:#0b1020;border:1px solid #253047;border-radius:10px;padding:10px
 }
@@ -151,6 +151,44 @@ canvas{max-width:100%;height:auto;background:transparent;display:block}
 /* Region marquee (drawn over Original canvas) */
 .marquee{
   position:absolute;border:2px dashed #93c5fd;pointer-events:none
+}
+
+/* Full-screen editor */
+.editor.hidden{display:none}
+.editor{
+  position:fixed; inset:0; z-index:60; background:#0b1020;
+  display:grid; grid-template-columns:1fr 320px;
+}
+@media (max-width: 900px){ .editor{grid-template-columns:1fr} .editor-right{display:none} }
+
+.editor-left{display:flex; flex-direction:column; min-width:0}
+.editor-toolbar{
+  display:flex; gap:8px; align-items:center; padding:10px; border-bottom:1px solid var(--line);
+  background:#111827;
+}
+.editor-toolbar .tool.active{outline:2px solid var(--accent)}
+.editor-left .spacer{flex:1}
+.editor-canvas-wrap{position:relative; flex:1; overflow:hidden; touch-action:none}
+#editCanvas, #editOverlay{position:absolute; left:0; top:0; width:100%; height:100%}
+#editOverlay{pointer-events:none}
+
+.editor-right{
+  border-left:1px solid var(--line); padding:12px; overflow:auto; background:#111827
+}
+.editor-palette{display:flex; flex-wrap:wrap; gap:8px; margin-bottom:10px}
+.editor-palette .sw{
+  width:26px; height:26px; border-radius:6px; border:1px solid #334155; display:inline-block
+}
+.editor-checks label{
+  display:inline-flex; align-items:center; gap:6px; margin:4px 8px 4px 0
+}
+
+/* Prevent iOS long-press selection inside canvases */
+.canvas-wrap,
+#srcCanvas,
+.editor-canvas-wrap,
+#editCanvas{
+  -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; touch-action:none;
 }
 
 /* Footer */
