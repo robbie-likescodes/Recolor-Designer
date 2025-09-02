@@ -17,6 +17,7 @@
   <button id="openProjects" class="ghost" type="button">Projects</button>
 </header>
 
+<!-- Projects side pane -->
 <aside id="projectsPane" class="sidepane" aria-hidden="true">
   <div class="panehead">
     <h2>Projects</h2>
@@ -44,11 +45,13 @@
 
 <main>
   <section class="controls">
+    <!-- 1) Load image -->
     <div class="card">
       <h2>1) Load image</h2>
       <div class="row wrap">
         <label class="filelike">Upload
-          <input type="file" id="fileInput" accept="image/*" capture="environment">
+          <!-- accept=image/* lets users pick from camera roll AND take a new photo -->
+          <input type="file" id="fileInput" accept="image/*">
         </label>
         <button id="pasteBtn" type="button" title="Paste image from clipboard (desktop)">Paste</button>
         <button id="resetBtn" type="button" disabled>Reset</button>
@@ -62,9 +65,10 @@
           Process at full resolution
         </label>
       </div>
-      <small>Tip: On phone, tap <em>Upload</em> to use your camera.</small>
+      <small>Tip: On phone, tap <em>Upload</em> to use your camera or choose a photo from your library.</small>
     </div>
 
+    <!-- 2) Palette -->
     <div class="card">
       <h2>2) Palette</h2>
       <div id="paletteList" class="palette-list"></div>
@@ -93,6 +97,7 @@
       </div>
     </div>
 
+    <!-- 3) Mapping options -->
     <div class="card">
       <h2>3) Mapping options</h2>
       <div class="row">
@@ -122,6 +127,24 @@
         <button id="downloadBtn" type="button" disabled>Download PNG</button>
       </div>
     </div>
+
+    <!-- Region tool -->
+    <div class="card">
+      <h2>Region tool (optional)</h2>
+      <div class="row wrap">
+        <label class="chk"><input type="checkbox" id="regionMode"> Draw region (drag on Original)</label>
+        <button id="regionClear" type="button" class="ghost">Clear regions</button>
+      </div>
+      <div id="regionConfig" class="region-config" hidden>
+        <h3>Region palette</h3>
+        <div id="regionPaletteChecks"></div>
+        <div class="row gap">
+          <button id="regionApply" type="button">Save region</button>
+          <button id="regionCancel" type="button" class="ghost">Cancel</button>
+        </div>
+        <small>Uncheck colors you do <em>not</em> want to appear in this region.</small>
+      </div>
+    </div>
   </section>
 
   <section class="canvases">
@@ -129,8 +152,11 @@
       <h3>Original</h3>
       <div class="canvas-wrap">
         <canvas id="srcCanvas" tabindex="0" aria-label="Original image preview"></canvas>
+        <!-- Marquee overlay will be absolutely positioned inside this wrapper -->
       </div>
+      <small>Tip: press & hold on the image to pick a color (eyedropper), or ALT-click on desktop.</small>
     </div>
+
     <div class="canvas-card">
       <h3>Mapped</h3>
       <div class="canvas-wrap">
@@ -144,7 +170,17 @@
   <p>Palette Mapper · Works offline-ready · Mobile-friendly</p>
 </footer>
 
-<!-- Your full JS file from the previous message -->
+<!-- Eyedropper popover (JS updates/positions this) -->
+<div id="eyedropperPopover" class="popover" hidden>
+  <div class="swatch" id="eyeSwatch"></div>
+  <code id="eyeHex">#000000</code>
+  <div class="row gap">
+    <button id="eyeAdd" type="button">Add to palette</button>
+    <button id="eyeCancel" type="button" class="ghost">Cancel</button>
+  </div>
+</div>
+
+<!-- Your JS bundle -->
 <script src="app.js"></script>
 </body>
 </html>
