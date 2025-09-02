@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Palette Mapper · Cup Print Helper</title>
+  <link rel="stylesheet" href="styles.css" />
+  <meta name="theme-color" content="#0f172a">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo" aria-hidden="true">☕</span>
+    <h1>Palette Mapper</h1>
+  </div>
+  <div class="spacer"></div>
+  <button id="openProjects" class="ghost" type="button">Projects</button>
+</header>
+
+<aside id="projectsPane" class="sidepane" aria-hidden="true">
+  <div class="panehead">
+    <h2>Projects</h2>
+    <button id="closeProjects" class="ghost" type="button" aria-label="Close">✕</button>
+  </div>
+  <div class="panecontent">
+    <div class="row wrap gap">
+      <button id="saveProject" type="button">Save current</button>
+      <button id="refreshProjects" type="button">Refresh list</button>
+    </div>
+
+    <div id="projectsList" class="list" aria-label="Saved projects"></div>
+
+    <hr>
+
+    <div class="row wrap gap">
+      <button id="exportProject" type="button">Export selected</button>
+      <label class="filelike">Import
+        <input type="file" id="importProject" accept="application/json">
+      </label>
+      <button id="deleteProject" class="danger" type="button">Delete selected</button>
+    </div>
+  </div>
+</aside>
+
+<main>
+  <section class="controls">
+    <div class="card">
+      <h2>1) Load image</h2>
+      <div class="row wrap">
+        <label class="filelike">Upload
+          <input type="file" id="fileInput" accept="image/*" capture="environment">
+        </label>
+        <button id="pasteBtn" type="button" title="Paste image from clipboard (desktop)">Paste</button>
+        <button id="resetBtn" type="button" disabled>Reset</button>
+      </div>
+      <div class="row wrap">
+        <label>Max preview width (px)
+          <input type="number" id="maxW" value="1400" min="300" step="100">
+        </label>
+        <label class="chk">
+          <input type="checkbox" id="keepFullRes" checked>
+          Process at full resolution
+        </label>
+      </div>
+      <small>Tip: On phone, tap <em>Upload</em> to use your camera.</small>
+    </div>
+
+    <div class="card">
+      <h2>2) Palette</h2>
+      <div id="paletteList" class="palette-list"></div>
+      <div class="row gap wrap">
+        <button id="addColor" type="button">+ Add color</button>
+        <button id="clearColors" type="button">Clear</button>
+        <button id="loadExample" type="button">Load example</button>
+      </div>
+
+      <details>
+        <summary>Auto-extract from image (optional)</summary>
+        <div class="row gap wrap">
+          <label>K (colors) <input type="number" id="kColors" value="5" min="2" max="16"></label>
+          <button id="autoExtract" type="button" disabled>Extract</button>
+        </div>
+        <small>Extract a starting palette, then edit hex to exact brand/spot colors.</small>
+      </details>
+
+      <div class="card subtle">
+        <h3>Saved Palettes</h3>
+        <div id="savedPalettes" class="list tiny" aria-label="Saved palettes"></div>
+        <div class="row gap wrap">
+          <button id="savePalette" type="button">Save current palette</button>
+          <button id="clearSavedPalettes" type="button">Clear saved</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>3) Mapping options</h2>
+      <div class="row">
+        <label>Chroma weight
+          <input type="range" id="wChroma" min="50" max="200" value="100">
+        </label>
+        <output id="wChromaOut">1.00×</output>
+      </div>
+      <div class="row">
+        <label>Lightness weight
+          <input type="range" id="wLight" min="50" max="200" value="100">
+        </label>
+        <output id="wLightOut">1.00×</output>
+      </div>
+      <div class="row wrap">
+        <label class="chk"><input type="checkbox" id="useDither"> Floyd–Steinberg dithering</label>
+        <label>Background
+          <select id="bgMode">
+            <option value="keep">Keep alpha</option>
+            <option value="white">Force white</option>
+            <option value="transparent">Force transparent (alpha &lt; 128)</option>
+          </select>
+        </label>
+      </div>
+      <div class="row gap wrap">
+        <button id="applyBtn" type="button" disabled>Refresh with my color selection</button>
+        <button id="downloadBtn" type="button" disabled>Download PNG</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="canvases">
+    <div class="canvas-card">
+      <h3>Original</h3>
+      <div class="canvas-wrap">
+        <canvas id="srcCanvas" tabindex="0" aria-label="Original image preview"></canvas>
+      </div>
+    </div>
+    <div class="canvas-card">
+      <h3>Mapped</h3>
+      <div class="canvas-wrap">
+        <canvas id="outCanvas" tabindex="0" aria-label="Palette-mapped image"></canvas>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <p>Palette Mapper · Works offline-ready · Mobile-friendly</p>
+</footer>
+
+<!-- Your full JS file from the previous message -->
+<script src="app.js"></script>
+</body>
+</html>
