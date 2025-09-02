@@ -17,45 +17,26 @@
   <button id="openProjects" class="ghost" type="button">Projects</button>
 </header>
 
-<!-- Projects side pane -->
-<aside id="projectsPane" class="sidepane" aria-hidden="true">
-  <div class="panehead">
-    <h2>Projects</h2>
-    <button id="closeProjects" class="ghost" type="button" aria-label="Close">✕</button>
-  </div>
-  <div class="panecontent">
-    <div class="row wrap gap">
-      <button id="saveProject" type="button">Save current</button>
-      <button id="refreshProjects" type="button">Refresh list</button>
-    </div>
-
-    <div id="projectsList" class="list" aria-label="Saved projects"></div>
-
-    <hr>
-
-    <div class="row wrap gap">
-      <button id="exportProject" type="button">Export selected</button>
-      <label class="filelike">Import
-        <input type="file" id="importProject" accept="application/json">
-      </label>
-      <button id="deleteProject" class="danger" type="button">Delete selected</button>
-    </div>
-  </div>
-</aside>
-
 <main>
   <section class="controls">
     <!-- 1) Load image -->
     <div class="card">
       <h2>1) Load image</h2>
       <div class="row wrap">
+        <!-- This one gives BOTH Photo Library and Camera options -->
         <label class="filelike">Upload
-          <!-- accept=image/* lets users pick from camera roll AND take a new photo -->
           <input type="file" id="fileInput" accept="image/*">
         </label>
+
+        <!-- Optional: Camera only -->
+        <label class="filelike">Camera
+          <input type="file" id="cameraInput" accept="image/*" capture="environment">
+        </label>
+
         <button id="pasteBtn" type="button" title="Paste image from clipboard (desktop)">Paste</button>
         <button id="resetBtn" type="button" disabled>Reset</button>
       </div>
+
       <div class="row wrap">
         <label>Max preview width (px)
           <input type="number" id="maxW" value="1400" min="300" step="100">
@@ -65,7 +46,10 @@
           Process at full resolution
         </label>
       </div>
-      <small>Tip: On phone, tap <em>Upload</em> to use your camera or choose a photo from your library.</small>
+      <small>
+        “Upload” lets you choose from Photo Library or Camera.  
+        “Camera” button forces the camera only.
+      </small>
     </div>
 
     <!-- 2) Palette -->
@@ -77,21 +61,18 @@
         <button id="clearColors" type="button">Clear</button>
         <button id="loadExample" type="button">Load example</button>
       </div>
-
       <details>
         <summary>Auto-extract from image (optional)</summary>
         <div class="row gap wrap">
           <label>K (colors) <input type="number" id="kColors" value="5" min="2" max="16"></label>
           <button id="autoExtract" type="button" disabled>Extract</button>
         </div>
-        <small>Extract a starting palette, then edit hex to exact brand/spot colors.</small>
       </details>
-
       <div class="card subtle">
         <h3>Saved Palettes</h3>
-        <div id="savedPalettes" class="list tiny" aria-label="Saved palettes"></div>
+        <div id="savedPalettes" class="list tiny"></div>
         <div class="row gap wrap">
-          <button id="savePalette" type="button">Save current palette</button>
+          <button id="savePalette" type="button">Save current</button>
           <button id="clearSavedPalettes" type="button">Clear saved</button>
         </div>
       </div>
@@ -142,7 +123,6 @@
           <button id="regionApply" type="button">Save region</button>
           <button id="regionCancel" type="button" class="ghost">Cancel</button>
         </div>
-        <small>Uncheck colors you do <em>not</em> want to appear in this region.</small>
       </div>
     </div>
   </section>
@@ -151,36 +131,33 @@
     <div class="canvas-card">
       <h3>Original</h3>
       <div class="canvas-wrap">
-        <canvas id="srcCanvas" tabindex="0" aria-label="Original image preview"></canvas>
-        <!-- Marquee overlay will be absolutely positioned inside this wrapper -->
+        <canvas id="srcCanvas" tabindex="0"></canvas>
       </div>
-      <small>Tip: press & hold on the image to pick a color (eyedropper), or ALT-click on desktop.</small>
+      <small>Press & hold to pick a color (eyedropper), or ALT-click on desktop.</small>
     </div>
-
     <div class="canvas-card">
       <h3>Mapped</h3>
       <div class="canvas-wrap">
-        <canvas id="outCanvas" tabindex="0" aria-label="Palette-mapped image"></canvas>
+        <canvas id="outCanvas" tabindex="0"></canvas>
       </div>
     </div>
   </section>
 </main>
 
 <footer>
-  <p>Palette Mapper · Works offline-ready · Mobile-friendly</p>
+  <p>Palette Mapper · Mobile-friendly · Works offline</p>
 </footer>
 
-<!-- Eyedropper popover (JS updates/positions this) -->
+<!-- Eyedropper popover -->
 <div id="eyedropperPopover" class="popover" hidden>
   <div class="swatch" id="eyeSwatch"></div>
   <code id="eyeHex">#000000</code>
   <div class="row gap">
-    <button id="eyeAdd" type="button">Add to palette</button>
+    <button id="eyeAdd" type="button">Add</button>
     <button id="eyeCancel" type="button" class="ghost">Cancel</button>
   </div>
 </div>
 
-<!-- Your JS bundle -->
 <script src="app.js"></script>
 </body>
 </html>
