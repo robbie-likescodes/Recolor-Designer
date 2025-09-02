@@ -17,7 +17,7 @@
   <button id="openProjects" class="ghost" type="button">Projects</button>
 </header>
 
-<!-- Projects side pane -->
+<!-- Projects pane -->
 <aside id="projectsPane" class="sidepane" aria-hidden="true">
   <div class="panehead">
     <h2>Projects</h2>
@@ -49,16 +49,14 @@
     <div class="card">
       <h2>1) Load image</h2>
       <div class="row wrap">
-        <!-- This one gives BOTH Photo Library and Camera options -->
+        <!-- Gives Photo Library + Camera chooser -->
         <label class="filelike">Upload
           <input type="file" id="fileInput" accept="image/*">
         </label>
-
-        <!-- Optional: Camera only -->
+        <!-- Forces Camera only (optional) -->
         <label class="filelike">Camera
           <input type="file" id="cameraInput" accept="image/*" capture="environment">
         </label>
-
         <button id="pasteBtn" type="button" title="Paste image from clipboard (desktop)">Paste</button>
         <button id="resetBtn" type="button" disabled>Reset</button>
       </div>
@@ -72,10 +70,7 @@
           Process at full resolution
         </label>
       </div>
-      <small>
-        “Upload” lets you choose from Photo Library or Camera.  
-        “Camera” forces the camera only.
-      </small>
+      <small>“Upload” lets you choose from Photo Library or Camera on iOS. “Camera” forces the camera only.</small>
     </div>
 
     <!-- 2) Palette -->
@@ -94,7 +89,7 @@
           <label>K (colors) <input type="number" id="kColors" value="5" min="2" max="16"></label>
           <button id="autoExtract" type="button" disabled>Extract</button>
         </div>
-        <small>Extract a starting palette, then edit hex to exact brand/spot colors.</small>
+        <small>The app now auto-builds a 10-color palette after you upload. Use this extractor if you want a different K.</small>
       </details>
 
       <div class="card subtle">
@@ -136,7 +131,6 @@
         </label>
       </div>
 
-      <!-- Halftone dots block -->
       <div class="card subtle">
         <h3>Halftone (tiny dots)</h3>
         <label class="chk">
@@ -156,10 +150,7 @@
             Jitter positions slightly
           </label>
         </div>
-
-        <small>
-          Each cell becomes a dot of the nearest palette color, sized by coverage against the background.
-        </small>
+        <small>Each cell becomes a dot of the nearest palette color, sized by coverage vs background.</small>
       </div>
 
       <div class="row gap wrap">
@@ -169,7 +160,7 @@
       </div>
     </div>
 
-    <!-- Region tool (rectangle) -->
+    <!-- Legacy rectangle region section (kept for IDs, hidden by JS) -->
     <div class="card">
       <h2>Region tool (optional)</h2>
       <div class="row wrap">
@@ -183,7 +174,7 @@
           <button id="regionApply" type="button">Save region</button>
           <button id="regionCancel" type="button" class="ghost">Cancel</button>
         </div>
-        <small>Uncheck colors you do <em>not</em> want to appear in this rectangle.</small>
+        <small>Uncheck colors you do <em>not</em> want in this rectangle.</small>
       </div>
     </div>
   </section>
@@ -194,7 +185,7 @@
       <div class="canvas-wrap">
         <canvas id="srcCanvas" tabindex="0" aria-label="Original image preview"></canvas>
       </div>
-      <small>Press & hold to pick a color (eyedropper), or ALT-click on desktop.</small>
+      <small>Press & hold to pick a color in the full-screen editor. On desktop, ALT-click works on this preview.</small>
     </div>
 
     <div class="canvas-card">
@@ -210,17 +201,7 @@
   <p>Palette Mapper · Mobile-friendly · Works offline</p>
 </footer>
 
-<!-- Eyedropper popover -->
-<div id="eyedropperPopover" class="popover" hidden>
-  <div class="swatch" id="eyeSwatch"></div>
-  <code id="eyeHex">#000000</code>
-  <div class="row gap">
-    <button id="eyeAdd" type="button">Add</button>
-    <button id="eyeCancel" type="button" class="ghost">Cancel</button>
-  </div>
-</div>
-
-<!-- Full-screen Editor Overlay -->
+<!-- Full-screen Editor -->
 <div id="editorOverlay" class="editor hidden" aria-hidden="true">
   <div class="editor-left">
     <div class="editor-toolbar">
@@ -240,12 +221,22 @@
     <h3>Palette</h3>
     <div id="editorPalette" class="editor-palette"></div>
     <hr>
-    <h3>Region palette (lasso)</h3>
-    <small>Uncheck colors you do <em>not</em> want in this lasso region.</small>
+    <h3>Region restrictions (lasso)</h3>
+    <small>Uncheck colors you do <em>not</em> want inside the lasso.</small>
     <div id="lassoChecks" class="editor-checks"></div>
     <div class="row gap">
       <button id="lassoSave" type="button" disabled>Save region</button>
       <button id="lassoClear" type="button" class="ghost" disabled>Clear</button>
+    </div>
+    <hr>
+    <h3>Eyedropper preview</h3>
+    <div class="eye-preview">
+      <span id="eyeSwatch" class="sw"></span>
+      <code id="eyeHex">#000000</code>
+    </div>
+    <div class="row gap">
+      <button id="eyeAdd" type="button">Add to palette</button>
+      <button id="eyeCancel" type="button" class="ghost">Cancel</button>
     </div>
   </aside>
 </div>
