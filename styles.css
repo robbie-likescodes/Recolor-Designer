@@ -130,5 +130,28 @@ canvas{max-width:100%;height:auto;background:transparent;display:block}
 }
 .panecontent{padding:12px}
 
+/* Region tool */
+.region-config{
+  margin-top:8px;background:#0b1020;border:1px solid #253047;border-radius:10px;padding:10px
+}
+#regionPaletteChecks label{
+  display:inline-flex;align-items:center;gap:6px;margin:4px 8px 4px 0
+}
+
+/* Eyedropper popover */
+.popover{
+  position:absolute;z-index:50;background:#111827;border:1px solid #1f2937;
+  border-radius:10px;padding:10px;box-shadow:0 8px 24px rgba(0,0,0,.35)
+}
+.popover[hidden]{display:none !important}
+.popover .swatch{
+  width:28px;height:28px;border-radius:6px;border:1px solid #334155;margin-bottom:6px
+}
+
+/* Region marquee (drawn over Original canvas) */
+.marquee{
+  position:absolute;border:2px dashed #93c5fd;pointer-events:none
+}
+
 /* Footer */
 footer{padding:12px;text-align:center;color:var(--muted)}
