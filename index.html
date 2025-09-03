@@ -8,111 +8,178 @@
 </head>
 <body>
   <header>
-    <h1>Palette Mapper</h1>
-    <p>Reduce photos to limited colors for printing</p>
+    <div class="header-left">
+      <h1>Palette Mapper</h1>
+      <p>Reduce photos to limited colors for printing</p>
+    </div>
+    <div class="header-right">
+      <button id="openProjects" class="ghost" type="button">Projects</button>
+    </div>
   </header>
 
-  <!-- Image upload -->
+  <!-- 1) Load image -->
   <section class="card">
-    <h2>1. Upload image</h2>
+    <h2>1) Load image</h2>
     <div class="row">
       <input id="fileInput" type="file" accept="image/*" />
       <input id="cameraInput" type="file" accept="image/*" capture="environment" />
       <button id="pasteBtn" type="button">Paste</button>
       <button id="resetBtn" type="button" disabled>Reset</button>
     </div>
-    <label>Max preview width <input id="maxW" type="number" value="1400" /></label>
-    <label><input id="keepFullRes" type="checkbox" /> Keep full resolution on export</label>
-    <canvas id="srcCanvas"></canvas>
-  </section>
-
-  <!-- Palette controls -->
-  <section class="card">
-    <h2>2. Palette</h2>
+    <div class="help">*“Upload” lets you choose from Photo Library or Camera on iOS. “Camera” forces the camera only.</div>
     <div class="row">
-      <button id="addColor" type="button">Add color</button>
-      <button id="clearColors" type="button">Clear</button>
-      <button id="loadExample" type="button">Load example</button>
-      <button id="savePalette" type="button">Save palette</button>
-      <button id="clearSavedPalettes" type="button">Clear saved</button>
+      <label>Max preview width (px) <input id="maxW" type="number" min="600" value="1400" /></label>
+      <label class="check"><input id="keepFullRes" type="checkbox" checked /> Process at full resolution</label>
     </div>
-    <div id="paletteList"></div>
+
+    <div class="panel">
+      <div class="panel-head">Original</div>
+      <canvas id="srcCanvas"></canvas>
+      <div class="tiny-help">Press &amp; hold to pick a color in the full-screen editor. On desktop, ALT-click works on this preview.</div>
+      <div class="row">
+        <button id="openEditor" type="button">Open full-screen editor</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 2) Palette -->
+  <section class="card">
+    <h2>2) Palette</h2>
+    <div id="paletteList" class="palette-list"></div>
+    <div class="row">
+      <button id="addColor" type="button">+ Add color</button>
+      <button id="clearColors" class="ghost" type="button">Clear</button>
+      <button id="loadExample" class="ghost" type="button">Load example</button>
+      <button id="savePalette" class="ghost" type="button">Save current</button>
+      <button id="clearSavedPalettes" class="ghost" type="button">Clear saved</button>
+    </div>
+
+    <details>
+      <summary>Auto-extract from image (optional)</summary>
+      <div class="row">
+        <label>K colors <input id="kColors" type="number" min="2" max="16" value="6" /></label>
+        <button id="autoExtract" type="button" disabled>Auto extract</button>
+      </div>
+    </details>
+
     <h3>Saved Palettes</h3>
-    <div id="savedPalettes"></div>
-    <h3>Auto extract</h3>
-    <label>K colors <input id="kColors" type="number" value="6" min="2" max="16" /></label>
-    <button id="autoExtract" type="button" disabled>Auto extract from image</button>
+    <div id="savedPalettes" class="saved-list"></div>
   </section>
 
-  <!-- Mapping options -->
+  <!-- 3) Mapping options -->
   <section class="card">
-    <h2>3. Mapping</h2>
-    <label>Chroma weight <input id="wChroma" type="range" min="20" max="200" value="100" /><span id="wChromaOut"></span></label>
-    <label>Lightness weight <input id="wLight" type="range" min="20" max="200" value="100" /><span id="wLightOut"></span></label>
-    <label><input id="useDither" type="checkbox" /> Use Floyd–Steinberg dithering</label>
-    <label>Background
-      <select id="bgMode">
-        <option value="keep">Keep original</option>
-        <option value="white">Force white</option>
-        <option value="transparent">Transparent</option>
-      </select>
-    </label>
-    <button id="applyBtn" type="button" disabled>Apply mapping</button>
-    <button id="downloadBtn" type="button" disabled>Download PNG</button>
+    <h2>3) Mapping options</h2>
+    <div class="row">
+      <label>Chroma weight
+        <input id="wChroma" type="range" min="20" max="200" value="100" />
+        <span id="wChromaOut" class="mono"></span>
+      </label>
+      <label>Lightness weight
+        <input id="wLight" type="range" min="20" max="200" value="100" />
+        <span id="wLightOut" class="mono"></span>
+      </label>
+    </div>
+    <div class="row">
+      <label class="check"><input id="useDither" type="checkbox" /> Use Floyd–Steinberg dithering</label>
+      <label>Background
+        <select id="bgMode">
+          <option value="keep">Keep original</option>
+          <option value="white">Force white</option>
+          <option value="transparent">Transparent</option>
+        </select>
+      </label>
+    </div>
+    <div class="row">
+      <button id="applyBtn" type="button" disabled>Apply mapping</button>
+      <button id="downloadBtn" type="button" disabled>Download PNG</button>
+    </div>
   </section>
 
-  <!-- Halftone -->
+  <!-- 4) Halftone -->
   <section class="card">
-    <h2>4. Halftone (optional)</h2>
-    <label><input id="useHalftone" type="checkbox" /> Render as dots</label>
-    <label>Dot cell size <input id="dotCell" type="number" value="6" /></label>
-    <label>Background color <input id="dotBg" type="color" value="#FFFFFF" /></label>
-    <label><input id="dotJitter" type="checkbox" /> Add jitter</label>
+    <h2>4) Halftone (optional)</h2>
+    <div class="row">
+      <label class="check"><input id="useHalftone" type="checkbox" /> Render as dots</label>
+      <label>Dot cell size <input id="dotCell" type="number" min="3" max="64" value="6" /></label>
+      <label>Background color <input id="dotBg" type="color" value="#FFFFFF" /></label>
+      <label class="check"><input id="dotJitter" type="checkbox" /> Add jitter</label>
+    </div>
   </section>
 
   <!-- Output -->
   <section class="card">
-    <h2>Output</h2>
+    <h2>Mapped</h2>
     <canvas id="outCanvas"></canvas>
   </section>
 
-  <!-- Codes + Report -->
+  <!-- 5) Codes & Report (PMS / HEX toggle) -->
   <section class="card">
-    <h2>5. Codes & Report</h2>
+    <h2>5) Codes &amp; Report</h2>
     <label>Show codes as:
       <select id="colorCodeMode">
         <option value="pms">PMS (default)</option>
         <option value="hex">HEX</option>
       </select>
     </label>
+
     <div id="codeList" class="code-list"></div>
+
     <div class="row">
       <button id="exportReport" type="button">Export report</button>
-      <a id="mailtoLink" href="#">Email to printer</a>
+      <a id="mailtoLink" class="ghost" href="#">Email to printer</a>
     </div>
   </section>
 
-  <!-- Editor full-screen overlay -->
+  <!-- Projects Drawer -->
+  <aside id="projectsPane" class="projects" aria-hidden="true">
+    <div class="projects-head">
+      <h3>Projects</h3>
+      <button id="closeProjects" class="ghost" type="button">Close</button>
+    </div>
+    <div class="projects-actions row">
+      <button id="saveProject" type="button">Save</button>
+      <button id="refreshProjects" class="ghost" type="button">Refresh</button>
+      <button id="exportProject" class="ghost" type="button">Export</button>
+      <label class="filelike">
+        Import
+        <input id="importProject" type="file" accept="application/json" hidden />
+      </label>
+      <button id="deleteProject" class="ghost danger" type="button">Delete</button>
+    </div>
+    <div id="projectsList" class="projects-list"></div>
+  </aside>
+
+  <!-- Full-screen editor overlay -->
   <div id="editorOverlay" class="hidden" aria-hidden="true">
     <div class="editor-toolbar">
-      <button id="toolEyedrop">Eyedrop</button>
+      <button id="toolEyedrop" class="active">Eyedrop</button>
       <button id="toolLasso">Lasso</button>
       <button id="toolPan">Pan</button>
+      <div class="grow"></div>
       <button id="editorDone">Done</button>
     </div>
     <canvas id="editCanvas"></canvas>
     <canvas id="editOverlay"></canvas>
     <aside class="editor-right">
       <h3>Palette</h3>
-      <div id="editorPalette"></div>
+      <div id="editorPalette" class="editor-swatches"></div>
+
       <h3>Eyedrop</h3>
-      <div class="row"><span id="eyeSwatch" class="sw"></span><span id="eyeHex">—</span></div>
-      <button id="eyeAdd">Add</button>
-      <button id="eyeCancel">Cancel</button>
+      <div class="row">
+        <span id="eyeSwatch" class="sw"></span>
+        <span id="eyeHex" class="mono">—</span>
+      </div>
+      <div class="row">
+        <button id="eyeAdd" type="button">Add</button>
+        <button id="eyeCancel" class="ghost" type="button">Cancel</button>
+      </div>
+
       <h3>Lasso</h3>
-      <div id="lassoChecks"></div>
-      <button id="lassoSave">Save region</button>
-      <button id="lassoClear">Clear</button>
+      <div id="lassoChecks" class="lasso-checks"></div>
+      <div class="row">
+        <button id="lassoSave" type="button" disabled>Save region</button>
+        <button id="lassoClear" class="ghost" type="button" disabled>Clear</button>
+      </div>
     </aside>
   </div>
 
