@@ -1,14 +1,12 @@
-/* Palette Mapper — Cup Print Helper (FULL JS v9)
-   Includes:
-   - Full-res pipeline for razor-sharp export (no resampling; smoothing off)
-   - Optional edge sharpen (checkbox id="sharpenEdges")
-   - Robust uploads (Photo Library/Camera/Drag&Drop/Paste), HEIC guard, EXIF orientation
-   - Hybrid auto-palette (histogram + K-means), 10 colors default on load
-   - Full-screen editor (eyedropper + lasso regions with per-region palette)
-   - Palette mapping (Lab) + Floyd–Steinberg dithering
-   - Halftone dots renderer
-   - PMS/HEX toggle with nearest PMS (JSON lib) + report + mailto
-   - Projects via IndexedDB, saved palettes via localStorage
+/* Palette Mapper — Cup Print Helper (FULL JS v10)
+   New in v10:
+   - Per-color tolerance slider (influence) and optional A/B pattern replacement
+   - Pattern options: choose two palette colors, balance %, cell size (texture)
+   - Pattern honored in both normal mapping and halftone rendering
+   - Tolerances & patterns persist in Projects and Prefs
+   - Contextual toasts: micro-tips for Eyedrop, Lasso, Halftone, Pattern, Export, etc.
+   - ALT-click eyedrop on preview (desktop) + long-press eyedrop in full-screen editor
+   - High-res pipeline + optional edge sharpen (already present)
 */
 
 /////////////////////////////// DOM ///////////////////////////////
@@ -20,7 +18,7 @@ const els = {
   resetBtn: document.getElementById('resetBtn'),
   maxW: document.getElementById('maxW'),
   keepFullRes: document.getElementById('keepFullRes'),
-  sharpenEdges: document.getElementById('sharpenEdges'), // optional checkbox
+  sharpenEdges: document.getElementById('sharpenEdges'),
   srcCanvas: document.getElementById('srcCanvas'),
   outCanvas: document.getElementById('outCanvas'),
 
@@ -96,12 +94,12 @@ octx.imageSmoothingEnabled = false;
 
 /////////////////////////////// State ///////////////////////////////
 const state = {
-  fullBitmap: null,   // ImageBitmap or HTMLImageElement (original)
+  fullBitmap: null,
   fullW: 0,
   fullH: 0,
-  exifOrientation: 1, // 1..8
+  exifOrientation: 1,
   selectedProjectId: null,
-  codeMode: 'pms',    // 'pms' | 'hex'
+  codeMode: 'pms', // 'pms' | 'hex'
 };
 
 const regions = []; // lasso polygons / rects
@@ -114,18 +112,60 @@ const editor = {
 /////////////////////////////// Constants & Utils ///////////////////////////////
 const MAX_PREVIEW_WIDTH = 2000;
 const CODE_MODES = { PMS: 'pms', HEX: 'hex' };
-
 const clamp = (v, min, max) => (v < min ? min : (v > max ? max : v));
 const hexToRgb = (hex) => { let h=(hex||'').trim(); if(!h.startsWith('#')) h='#'+h; const m=/^#([0-9a-f]{6})$/i.exec(h); if(!m) return null; const n=parseInt(m[1],16); return {r:(n>>16)&255,g:(n>>8)&255,b:n&255}; };
-const rgbToHex = (r,g,b) => '#' + [r,g,b].map(v=>v.toString(16).padStart(2,'0')).join('').toUpperCase();
+const rgbToHex = (r,g,b) => '#' + [r,g,b].map(v=>clamp(v,0,255).toString(16).padStart(2,'0')).join('').toUpperCase();
 const fmtMult = n => (Number(n)/100).toFixed(2)+'×';
 const inRect = (x,y,r) => x>=r.x0 && x<=r.x1 && y>=r.y0 && y<=r.y1;
 const normalizeRect = r => ({ x0:Math.min(r.x0,r.x1), y0:Math.min(r.y0,r.y1), x1:Math.max(r.x0,r.x1), y1:Math.max(r.y0,r.y1) });
 const scaleRect = (r,sx,sy)=>({ x0:Math.floor(r.x0*sx), y0:Math.floor(r.y0*sy), x1:Math.floor(r.x1*sx), y1:Math.floor(r.y1*sy) });
 const getOrientedDims = (o, w, h) => ([5,6,7,8].includes(o) ? {w:h, h:w} : {w, h});
+const randHash01 = (x,y)=>{ // stable 0..1 hash per integer grid coord
+  let n = (x*73856093) ^ (y*19349663);
+  n = (n<<13) ^ n; n = (n*(n*n*15731 + 789221) + 1376312589) & 0x7fffffff;
+  return (n / 0x7fffffff);
+};
 
-/////////////////////////////// Storage ///////////////////////////////
-const LS_KEYS = { PALETTES:'pm_saved_palettes_v1', PREFS:'pm_prefs_v1' };
+/////////////////////////////// Toasts (lightweight) ///////////////////////////////
+const TOAST_LS_KEY = 'pm_tips_v2';
+const tipSeen = (k)=>{ try{ const o=JSON.parse(localStorage.getItem(TOAST_LS_KEY)||'{}'); return !!o[k]; }catch{ return false; } };
+const markTip = (k)=>{ try{ const o=JSON.parse(localStorage.getItem(TOAST_LS_KEY)||'{}'); o[k]=true; localStorage.setItem(TOAST_LS_KEY,JSON.stringify(o)); }catch{} };
+let toastHost=null, toastQueue=[];
+function ensureToastHost(){
+  if(toastHost) return;
+  toastHost=document.createElement('div');
+  toastHost.id='pm_toasts';
+  toastHost.setAttribute('aria-live','polite');
+  toastHost.style.cssText='position:fixed;left:50%;transform:translateX(-50%);bottom:calc(16px + env(safe-area-inset-bottom));display:grid;gap:8px;z-index:99999';
+  const style=document.createElement('style');
+  style.textContent=`
+  .pm-toast{background:#0b1225e6;border:1px solid #1e293b;color:#e5e7eb;padding:10px 12px;border-radius:10px;backdrop-filter:blur(10px);max-width:92vw;box-shadow:0 8px 24px rgba(0,0,0,.35)}
+  .pm-toast.pm-tip{border-color:#1f3a5f}
+  .pm-toast.pm-success{border-color:#14532d}
+  .pm-toast.pm-warn{border-color:#7c2d12}
+  .pm-toast .pm-x{margin-left:10px;background:transparent;border:0;color:#dbeafe;font-weight:700;cursor:pointer}
+  @media(prefers-reduced-motion:no-preference){
+    .pm-toast{animation:pmfade .25s ease both}
+    @keyframes pmfade{from{transform:translate(-50%,8px);opacity:.001}to{transform:translate(-50%,0);opacity:1}}
+  }`;
+  document.head.appendChild(style);
+  document.body.appendChild(toastHost);
+}
+function toast(msg, type='tip', ms=3600){
+  ensureToastHost();
+  const div=document.createElement('div');
+  div.className=`pm-toast pm-${type}`;
+  div.innerHTML=`<span>${msg}</span> <button class="pm-x" aria-label="Dismiss">×</button>`;
+  const close=()=>{ if(!div) return; div.style.opacity='0'; div.style.transition='opacity .2s'; setTimeout(()=>div.remove(),220); };
+  div.querySelector('.pm-x').onclick=close;
+  toastHost.appendChild(div);
+  const t=setTimeout(close, ms);
+  div.addEventListener('pointerdown', close, {passive:true});
+  toastQueue.push({div,t});
+}
+
+/////////////////////////////// Storage (Saved Palettes + Projects) ///////////////////////////////
+const LS_KEYS = { PALETTES:'pm_saved_palettes_v1', PREFS:'pm_prefs_v2' }; // v2 to include paletteMeta
 const loadSavedPalettes = () => { try { return JSON.parse(localStorage.getItem(LS_KEYS.PALETTES)||'[]'); } catch { return []; } };
 const saveSavedPalettes = arr => localStorage.setItem(LS_KEYS.PALETTES, JSON.stringify(arr));
 const loadPrefs = () => { try { return JSON.parse(localStorage.getItem(LS_KEYS.PREFS)||'{}'); } catch { return {}; } };
@@ -145,18 +185,15 @@ function isHeicFile(file) {
   return name.endsWith('.heic') || name.endsWith('.heif') || type.includes('heic') || type.includes('heif');
 }
 function heicNotSupportedMessage() {
-  alert(
-`This photo appears to be HEIC/HEIF, which this browser can't decode into canvas.
+  alert(`This photo appears to be HEIC/HEIF, which this browser can't decode into canvas.
 
-Use a JPG/PNG, or on iPhone set: Settings → Camera → Formats → “Most Compatible”.`
-  );
+Use a JPG/PNG, or on iPhone set: Settings → Camera → Formats → “Most Compatible”.`);
 }
 function isLikelyJpeg(file){
   const t=(file.type||'').toLowerCase();
   const ext=(file.name||'').split('.').pop().toLowerCase();
   return t.includes('jpeg') || t.includes('jpg') || ext==='jpg' || ext==='jpeg';
 }
-// Minimal EXIF orientation parse
 async function readJpegOrientation(file){
   return new Promise((resolve) => {
     const reader = new FileReader();
@@ -169,7 +206,7 @@ async function readJpegOrientation(file){
           const marker = view.getUint16(offset, false); offset += 2;
           if (marker === 0xFFE1) {
             const exifLength = view.getUint16(offset, false); offset += 2;
-            if (view.getUint32(offset, false) !== 0x45786966) break; // "Exif"
+            if (view.getUint32(offset, false) !== 0x45786966) break;
             offset += 6;
             const tiffOffset = offset;
             const little = view.getUint16(tiffOffset, false) === 0x4949;
@@ -212,32 +249,122 @@ function drawImageWithOrientation(ctx, img, targetW, targetH, orientation){
 }
 
 /////////////////////////////// Palette UI ///////////////////////////////
-function addPaletteRow(hex='#FFFFFF'){
+function addPaletteRow(hex='#FFFFFF', meta=null){
+  // meta: { tol: number(50..200 default 100), pattern:{enabled,aIdx,bIdx,balance(0..100),cell} }
   const row=document.createElement('div'); row.className='palette-item';
   row.innerHTML=`
-    <input type="color" value="${hex}" aria-label="color picker">
-    <input type="text" value="${hex}" aria-label="hex code" placeholder="#RRGGBB">
-    <button class="ghost remove" type="button">Remove</button>
+    <div class="palette-main">
+      <input type="color" aria-label="color picker" value="${hex}">
+      <input type="text" aria-label="hex code" value="${hex}" placeholder="#RRGGBB">
+      <span class="tol"><span>Tol</span>
+        <input class="tolRange" type="range" min="50" max="200" value="${meta?.tol ?? 100}">
+        <span class="tolv mono">${fmtMult(meta?.tol ?? 100)}</span>
+      </span>
+      <button class="ghost remove" type="button">Remove</button>
+    </div>
+    <details class="pattern">
+      <summary>Replace with pattern (optional)</summary>
+      <div class="patrow">
+        <label>A <select class="patA"></select></label>
+        <label>B <select class="patB"></select></label>
+        <label>Balance <input class="patBal" type="range" min="0" max="100" value="${meta?.pattern?.balance ?? 50}"> <span class="patBalv mono">${(meta?.pattern?.balance ?? 50)}%</span></label>
+        <label>Cell <input class="patCell" type="number" min="3" max="64" value="${meta?.pattern?.cell ?? 6}"></label>
+        <label class="check"><input class="patEnable" type="checkbox" ${meta?.pattern?.enabled?'checked':''}> Enable</label>
+      </div>
+    </details>
   `;
   const colorInput=row.querySelector('input[type=color]');
   const hexInput=row.querySelector('input[type=text]');
   const delBtn=row.querySelector('.remove');
-  const sync=(fromColor)=>{
+  const tolRange=row.querySelector('.tolRange');
+  const tolOut=row.querySelector('.tolv');
+  const pat= {
+    details: row.querySelector('details.pattern'),
+    enable: row.querySelector('.patEnable'),
+    A: row.querySelector('.patA'),
+    B: row.querySelector('.patB'),
+    bal: row.querySelector('.patBal'),
+    balv: row.querySelector('.patBalv'),
+    cell: row.querySelector('.patCell')
+  };
+
+  const syncColor=(fromColor)=>{
     if(fromColor) hexInput.value = colorInput.value.toUpperCase();
     let v=hexInput.value.trim(); if(!v.startsWith('#')) v='#'+v;
     if(/^#([0-9A-Fa-f]{6})$/.test(v)){ colorInput.value=v; hexInput.value=v.toUpperCase(); }
+    renderCodeList(); updateMailto(); persistPrefs(); refreshPatternSelects();
   };
-  colorInput.addEventListener('input',()=>{ sync(true); renderCodeList(); updateMailto(); persistPrefs(); });
-  hexInput.addEventListener('change',()=>{ sync(false); renderCodeList(); updateMailto(); persistPrefs(); });
-  delBtn.addEventListener('click',()=>{ row.remove(); renderCodeList(); updateMailto(); persistPrefs(); });
+  colorInput.addEventListener('input',()=>syncColor(true));
+  hexInput.addEventListener('change',()=>syncColor(false));
+  delBtn.addEventListener('click',()=>{ row.remove(); renderCodeList(); updateMailto(); persistPrefs(); refreshPatternSelects(); });
+
+  tolRange.addEventListener('input',()=>{ tolOut.textContent = fmtMult(tolRange.value); });
+  tolRange.addEventListener('change',()=>{ persistPrefs(); });
+
+  pat.bal.addEventListener('input',()=>{ pat.balv.textContent = `${pat.bal.value}%`; });
+  [pat.enable,pat.bal,pat.cell,pat.A,pat.B].forEach(el=> el.addEventListener('change',()=>persistPrefs()));
+
+  // one-time pattern hint toast
+  pat.details?.addEventListener('toggle', ()=>{
+    if(pat.details.open && !tipSeen('pattern_hint')){
+      toast('Replace this color with an A/B pattern. Balance sets coverage; Cell sets texture.', 'tip');
+      markTip('pattern_hint');
+    }
+  });
+
   els.paletteList.appendChild(row);
+  refreshPatternSelects();
 }
 function getPalette(){
   const rows=[...els.paletteList.querySelectorAll('.palette-item')];
   const out=[]; for(const r of rows){ const hex=r.querySelector('input[type=text]').value.trim(); const rgb=hexToRgb(hex); if(rgb) out.push([rgb.r,rgb.g,rgb.b]); }
   return out;
 }
-function setPalette(hexes){ els.paletteList.innerHTML=''; hexes.forEach(h=>addPaletteRow(h)); }
+// NEW: return palette with per-color meta
+function getPaletteWithMeta(){
+  const rows=[...els.paletteList.querySelectorAll('.palette-item')];
+  const out=[];
+  rows.forEach((r,idx)=>{
+    const hexEl=r.querySelector('input[type=text]');
+    const rgb=hexToRgb(hexEl.value.trim()); if(!rgb) return;
+    const tol=clamp(parseInt(r.querySelector('.tolRange').value,10)||100,50,200);
+    const A = (r.querySelector('.patA').selectedIndex)|0;
+    const B = (r.querySelector('.patB').selectedIndex)|0;
+    const balance = clamp(parseInt(r.querySelector('.patBal').value,10)||50,0,100);
+    const cell = clamp(parseInt(r.querySelector('.patCell').value,10)||6,3,64);
+    const enabled = !!r.querySelector('.patEnable').checked;
+    out.push({
+      rgb:[rgb.r,rgb.g,rgb.b],
+      tol,
+      pattern:{ enabled, aIdx:A, bIdx:B, balance, cell }
+    });
+  });
+  return out;
+}
+function setPalette(hexes, metas=null){
+  els.paletteList.innerHTML='';
+  hexes.forEach((h,i)=>addPaletteRow(h, metas?.[i]||null));
+  refreshPatternSelects();
+}
+function refreshPatternSelects(){
+  const rows=[...els.paletteList.querySelectorAll('.palette-item')];
+  const hexes=rows.map(r=>r.querySelector('input[type=text]').value.trim().toUpperCase());
+  rows.forEach((r,ri)=>{
+    const A=r.querySelector('.patA'), B=r.querySelector('.patB');
+    const selA=A.selectedIndex; const selB=B.selectedIndex;
+    [A,B].forEach(sel=>{
+      const v=sel.value; sel.innerHTML=''; hexes.forEach((h,idx)=>{
+        const opt=document.createElement('option'); opt.value=String(idx); opt.textContent=`${idx+1}: ${h}`; sel.appendChild(opt);
+      });
+      // default to next/next+1 (not self)
+      if(sel === A){
+        let def = (ri+1) % hexes.length; sel.selectedIndex = (selA>=0?selA:def);
+      }else{
+        let def = (ri+2) % hexes.length; sel.selectedIndex = (selB>=0?selB:def);
+      }
+    });
+  });
+}
 function renderSavedPalettes(){
   if(!els.savedPalettes) return;
   const list=loadSavedPalettes(); els.savedPalettes.innerHTML='';
@@ -259,11 +386,8 @@ function drawPreviewFromState(){
   els.srcCanvas.width = w; els.srcCanvas.height = h;
   sctx.clearRect(0,0,w,h); sctx.imageSmoothingEnabled=false;
 
-  if (orient === 1 && bmp instanceof ImageBitmap) {
-    sctx.drawImage(bmp,0,0,w,h);
-  } else {
-    drawImageWithOrientation(sctx, bmp, w, h, orient);
-  }
+  if (orient === 1 && bmp instanceof ImageBitmap) sctx.drawImage(bmp,0,0,w,h);
+  else drawImageWithOrientation(sctx, bmp, w, h, orient);
 
   els.outCanvas.width = w; els.outCanvas.height = h;
   octx.clearRect(0,0,w,h); octx.imageSmoothingEnabled=false;
@@ -274,7 +398,7 @@ function drawPreviewFromState(){
 }
 function toggleImageActions(enable){
   els.applyBtn.disabled=!enable;
-  if(els.autoExtract) els.autoExtract.disabled=!enable;
+  els.autoExtract && (els.autoExtract.disabled=!enable);
   els.resetBtn.disabled=!enable;
 }
 
@@ -295,7 +419,6 @@ async function handleFile(file, source='file'){
 
     state.exifOrientation = 1;
 
-    // Fast path: createImageBitmap with EXIF
     if (typeof createImageBitmap === 'function') {
       try{
         const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
@@ -304,19 +427,14 @@ async function handleFile(file, source='file'){
       }catch(e){ console.warn('createImageBitmap failed:', e); }
     }
 
-    // Fallback: <img> + manual EXIF orientation for JPEG
     const url = objectUrlFor(file);
     try{
       const img = await loadImage(url);
       state.fullBitmap = img;
       state.fullW = img.naturalWidth || img.width; state.fullH = img.naturalHeight || img.height;
-      if (isLikelyJpeg(file)) {
-        try { state.exifOrientation = await readJpegOrientation(file); } catch {}
-      } else { state.exifOrientation = 1; }
+      if (isLikelyJpeg(file)) { try { state.exifOrientation = await readJpegOrientation(file); } catch {} } else { state.exifOrientation = 1; }
       drawPreviewFromState(); toggleImageActions(true);
-    } finally {
-      revokeUrl(url);
-    }
+    } finally { revokeUrl(url); }
   } catch(err){
     console.error('Image load error:', err);
     alert('Could not open that image. Try a JPG/PNG or a different photo.');
@@ -341,7 +459,18 @@ function deltaE2Weighted(l1,l2,wL,wC){ const dL=l1[0]-l2[0], da=l1[1]-l2[1], db=
 function buildPaletteLab(pal){ return pal.map(([r,g,b])=>({ rgb:[r,g,b], lab:rgbToLab(r,g,b) })); }
 
 /////////////////////////////// Mapping (palette / halftone) ///////////////////////////////
-function mapToPalette(imgData, palette, wL=1.0, wC=1.0, dither=false, bgMode='keep', effRegions=[]){
+// Pattern decision helper: choose A vs B for a pixel with coverage probability p (0..1)
+function patternPickAB(x,y,cell,p){
+  const gx = Math.floor(x/Math.max(1,cell)), gy = Math.floor(y/Math.max(1,cell));
+  const t = randHash01(gx,gy);
+  return t < p ? 'A' : 'B';
+}
+
+function mapToPalette(imgData, paletteMeta, wL=1.0, wC=1.0, dither=false, bgMode='keep', effRegions=[]){
+  // paletteMeta: [{rgb:[r,g,b], tol:50..200, pattern:{enabled,aIdx,bIdx,balance,cell}}]
+  const palette = paletteMeta.map(p=>p.rgb);
+  const palLab=buildPaletteLab(palette);
+  const tolFactors = paletteMeta.map(p=> 100 / clamp(p.tol||100,50,200)); // >1 means stricter, <1 means looser
   const w=imgData.width, h=imgData.height, src=imgData.data;
   const out=new ImageData(w,h); out.data.set(src);
 
@@ -352,7 +481,6 @@ function mapToPalette(imgData, palette, wL=1.0, wC=1.0, dither=false, bgMode='ke
     }
   }
 
-  const palLab=buildPaletteLab(palette);
   const errR=dither?new Float32Array(w*h):null;
   const errG=dither?new Float32Array(w*h):null;
   const errB=dither?new Float32Array(w*h):null;
@@ -363,6 +491,7 @@ function mapToPalette(imgData, palette, wL=1.0, wC=1.0, dither=false, bgMode='ke
       let r=out.data[i4], g=out.data[i4+1], b=out.data[i4+2];
       if(dither){ r=clamp(Math.round(r+errR[idx]),0,255); g=clamp(Math.round(g+errG[idx]),0,255); b=clamp(Math.round(b+errB[idx]),0,255); }
 
+      // region gating
       let allowedSet=null;
       if(effRegions && effRegions.length){
         for(let ri=effRegions.length-1; ri>=0; ri--){
@@ -376,10 +505,21 @@ function mapToPalette(imgData, palette, wL=1.0, wC=1.0, dither=false, bgMode='ke
       let best=0, bestD=Infinity;
       for(let p=0;p<palLab.length;p++){
         if(allowedSet && !allowedSet.has(p)) continue;
-        const d2=deltaE2Weighted(lab,palLab[p].lab,wL,wC);
+        const d2=deltaE2Weighted(lab,palLab[p].lab,wL,wC) * tolFactors[p]*tolFactors[p];
         if(d2<bestD){ bestD=d2; best=p; }
       }
-      const [nr,ng,nb]=palLab[best].rgb;
+
+      // If best color has a pattern, choose A or B instead
+      const meta = paletteMeta[best]?.pattern || {};
+      let outRGB = palLab[best].rgb;
+      if(meta.enabled && paletteMeta[meta.aIdx] && paletteMeta[meta.bIdx]){
+        const pCov = clamp((meta.balance||50)/100, 0, 1);
+        const pick = patternPickAB(x,y, meta.cell||6, pCov);
+        const pickIdx = (pick==='A'? meta.aIdx : meta.bIdx);
+        outRGB = palLab[pickIdx].rgb;
+      }
+
+      const [nr,ng,nb]=outRGB;
       out.data[i4]=nr; out.data[i4+1]=ng; out.data[i4+2]=nb;
 
       if(dither){
@@ -395,7 +535,7 @@ function mapToPalette(imgData, palette, wL=1.0, wC=1.0, dither=false, bgMode='ke
   return out;
 }
 
-// Halftone helpers
+// Halftone helpers (unchanged + small fixes)
 function avgColorInCell(data, w, h, x0, y0, sz) {
   let r=0,g=0,b=0,a=0,count=0;
   const x1=Math.min(w, x0+sz), y1=Math.min(h, y0+sz);
@@ -426,12 +566,14 @@ function allowedAt(x, y, w, effRegions){
     }
   } return allowed;
 }
-function renderHalftone(ctx, imgData, palette, bgHex, cellSize=6, jitter=false, wL=1.0, wC=1.0, effRegions=[]){
-  const w=imgData.width, h=imgData.height, data=imgData.data;
+function renderHalftone(ctx, imgData, paletteMeta, bgHex, cellSize=6, jitter=false, wL=1.0, wC=1.0, effRegions=[]){
+  const palette = paletteMeta.map(p=>p.rgb);
   const palLab=buildPaletteLab(palette);
+  const tolFactors = paletteMeta.map(p=> 100 / clamp(p.tol||100,50,200));
+  const w=imgData.width, h=imgData.height, data=imgData.data;
   const bg=hexToRgb(bgHex)||{r:255,g:255,b:255}; const bgLab=rgbToLab(bg.r,bg.g,b.b);
 
-  ctx.save(); ctx.fillStyle=rgbToHex(bg.r,b.g?bg.g:0,b.b?b.b:0); ctx.fillStyle = rgbToHex(bg.r,bg.g,bg.b); ctx.fillRect(0,0,w,h);
+  ctx.save(); ctx.fillStyle = rgbToHex(bg.r,bg.g,bg.b); ctx.fillRect(0,0,w,h);
 
   for(let y=0;y<h;y+=cellSize){
     for(let x=0;x<w;x+=cellSize){
@@ -444,12 +586,21 @@ function renderHalftone(ctx, imgData, palette, bgHex, cellSize=6, jitter=false, 
       let best=0, bestD=Infinity, found=false;
       for(let p=0;p<palLab.length;p++){
         if(allowed && !allowed.has(p)) continue;
-        const d2=deltaE2Weighted(lab,palLab[p].lab,wL,wC);
+        const d2=deltaE2Weighted(lab,palLab[p].lab,wL,wC) * tolFactors[p]*tolFactors[p];
         if(d2<bestD){ bestD=d2; best=p; found=true; }
       }
       if(!found && palLab.length) best=0;
 
-      const fg=palLab[best];
+      // Pattern support: swap dot color to A/B when enabled for chosen entry
+      let fgIndex = best;
+      const meta = paletteMeta[best]?.pattern || {};
+      if(meta.enabled && paletteMeta[meta.aIdx] && paletteMeta[meta.bIdx]){
+        const pCov = clamp((meta.balance||50)/100, 0, 1);
+        const pick = patternPickAB(cxPix,cyPix, meta.cell||cellSize, pCov);
+        fgIndex = (pick==='A'? meta.aIdx : meta.bIdx);
+      }
+
+      const fg=palLab[fgIndex];
       const cov=coverageBetweenColors(cell, fg.lab, bgLab, wL, wC);
       const maxR=(cellSize*0.5), radius=Math.max(0.4, Math.sqrt(cov)*maxR);
       let cx=x+cellSize*0.5, cy=y+cellSize*0.5;
@@ -539,7 +690,6 @@ function autoPaletteFromCanvasHybrid(canvas, k = 10) {
       return [r,g,b];
     });
 
-  // Use sampled (down) data for k-means init
   const centers = kmeansFromSeeds(img, k, ranked, 8);
   const hexes = centers.map(([r,g,b])=>rgbToHex(r,g,b));
   setPalette(hexes);
@@ -568,7 +718,6 @@ function nearestPms(hex){
   return out;
 }
 function currentPaletteCodes(){
-  // returns [{hex, label, swatchHex}]
   return getPalette().map(([r,g,b])=>{
     const hex = rgbToHex(r,g,b);
     if (state.codeMode === CODE_MODES.HEX) {
@@ -660,8 +809,12 @@ function openEditor(){
   editor.tool='eyedrop'; setToolActive('toolEyedrop');
   editor.lassoPts=[]; editor.lassoActive=false; drawLassoStroke(false);
   editor.eyedropTimer=null; editor.currentHex='#000000';
-  renderEditorPalette(); buildLassoChecks();
-  enableEditorEyedrop();
+  renderEditorPalette(); buildLassoChecks(); enableEditorEyedrop();
+
+  if(!tipSeen('editor_open')){
+    toast('Eyedrop is active. Press & hold to sample. Tap “Add” to put it in the palette.', 'tip', 4200);
+    markTip('editor_open');
+  }
 }
 function closeEditor(){
   if(!editor.active) return;
@@ -671,8 +824,8 @@ function closeEditor(){
 els.openEditor?.addEventListener('click', openEditor);
 els.editorDone?.addEventListener('click', closeEditor);
 els.toolEyedrop?.addEventListener('click', ()=>{ editor.tool='eyedrop'; setToolActive('toolEyedrop'); disableEditorLasso(); enableEditorEyedrop(); });
-els.toolLasso?.addEventListener('click', ()=>{ editor.tool='lasso'; setToolActive('toolLasso'); disableEditorEyedrop(); enableEditorLasso(); });
-els.toolPan?.addEventListener('click', ()=>{ editor.tool='pan'; setToolActive('toolPan'); disableEditorEyedrop(); disableEditorLasso(); });
+els.toolLasso?.addEventListener('click', ()=>{ editor.tool='lasso'; setToolActive('toolLasso'); disableEditorEyedrop(); enableEditorLasso(); if(!tipSeen('lasso_tip')){ toast('Draw a loop to define a region. Then tick allowed colors and “Save region”.','tip',4400); markTip('lasso_tip'); } });
+els.toolPan?.addEventListener('click', ()=>{ editor.tool='pan'; setToolActive('toolPan'); disableEditorEyedrop(); disableEditorLasso(); if(!tipSeen('pan_tip')){ toast('Pan is on. Two fingers to zoom on touch; switch tools any time.','tip',3800); markTip('pan_tip'); } });
 
 function pickAtEditor(evt){
   const rect=els.editCanvas.getBoundingClientRect();
@@ -713,6 +866,7 @@ els.eyeAdd?.addEventListener('click', ()=>{
   }
   addPaletteRow(editor.currentHex);
   renderEditorPalette(); buildLassoChecks(); renderCodeList(); updateMailto(); persistPrefs();
+  toast('Color added to palette. Adjust its Tol slider if needed.', 'success', 2600);
 });
 els.eyeCancel?.addEventListener('click', ()=>{ editor.octx?.clearRect(0,0,els.editOverlay.width,els.editOverlay.height); });
 
@@ -764,6 +918,7 @@ els.lassoSave?.addEventListener('click', ()=>{
   const mask=rasterizePolygonToMask(editor.lassoPts, els.srcCanvas.width, els.srcCanvas.height);
   regions.push({ type:'polygon', points: editor.lassoPts.map(p=>[p[0],p[1]]), mask, allowed });
   alert('Lasso region saved.');
+  toast('Region saved. Mapping will only use checked colors here.', 'success', 2600);
   editor.lassoPts=[]; drawLassoStroke(false); els.lassoSave.disabled=true; els.lassoClear.disabled=true;
 });
 
@@ -788,8 +943,7 @@ function wireCodesUI(){
     setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
   });
 
-  // Keep mailto up to date when palette changes
-  const observer = new MutationObserver(()=>{ renderCodeList(); updateMailto(); });
+  const observer = new MutationObserver(()=>{ renderCodeList(); updateMailto(); refreshPatternSelects(); });
   observer.observe(els.paletteList, { childList:true, subtree:true });
 
   renderCodeList();
@@ -798,23 +952,17 @@ function wireCodesUI(){
 
 /////////////////////////////// Edge Sharpen (optional) ///////////////////////////////
 function unsharpMask(imageData, amount=0.35){
-  // Simple 3x3 sharpen kernel
   const w=imageData.width, h=imageData.height, src=imageData.data;
   const out=new ImageData(w,h);
-  out.data.set(src); // start from original for borders
+  out.data.set(src);
   const k=[0,-1,0,-1,5,-1,0,-1,0];
-
   for(let y=1;y<h-1;y++){
     for(let x=1;x<w-1;x++){
-      let r=0,g=0,b=0;
-      let ki=0;
+      let r=0,g=0,b=0, ki=0;
       for(let dy=-1;dy<=1;dy++){
         for(let dx=-1;dx<=1;dx++,ki++){
-          const i=((y+dy)*w+(x+dx))*4;
-          const kv=k[ki];
-          r += src[i  ] * kv;
-          g += src[i+1] * kv;
-          b += src[i+2] * kv;
+          const i=((y+dy)*w+(x+dx))*4, kv=k[ki];
+          r += src[i  ] * kv; g += src[i+1] * kv; b += src[i+2] * kv;
         }
       }
       const o=(y*w+x)*4;
@@ -828,7 +976,7 @@ function unsharpMask(imageData, amount=0.35){
 }
 
 /////////////////////////////// UI Actions ///////////////////////////////
-function updateWeightsUI(){ if(els.wChromaOut) els.wChromaOut.textContent=fmtMult(els.wChroma.value); if(els.wLightOut) els.wLightOut.textContent=fmtMult(els.wLight.value); }
+function updateWeightsUI(){ els.wChromaOut && (els.wChromaOut.textContent=fmtMult(els.wChroma.value)); els.wLightOut && (els.wLightOut.textContent=fmtMult(els.wLight.value)); }
 
 function bindEvents(){
   // Upload inputs
@@ -863,7 +1011,7 @@ function bindEvents(){
   // Reset
   els.resetBtn?.addEventListener('click', ()=>{ if(!state.fullBitmap) return; drawPreviewFromState(); });
 
-  // Palette
+  // Palette buttons
   els.addColor?.addEventListener('click', ()=>{ addPaletteRow('#FFFFFF'); renderCodeList(); updateMailto(); persistPrefs(); });
   els.clearColors?.addEventListener('click', ()=>{ els.paletteList.innerHTML=''; renderCodeList(); updateMailto(); persistPrefs(); });
   els.loadExample?.addEventListener('click', ()=>{ setPalette(['#FFFFFF','#B3753B','#5B3A21','#D22C2C','#1D6E2E']); renderCodeList(); updateMailto(); persistPrefs(); });
@@ -884,18 +1032,19 @@ function bindEvents(){
     const img=sctx.getImageData(0,0,els.srcCanvas.width,els.srcCanvas.height);
     const centers=kmeans(img.data,k,10); setPalette(centers.map(([r,g,b])=>rgbToHex(r,g,b)));
     renderCodeList(); updateMailto(); persistPrefs();
+    toast('Palette extracted from image. Tweak colors or add more manually.', 'success', 3000);
   });
 
   // Weight outputs
   ['input','change'].forEach(ev=>{ els.wChroma?.addEventListener(ev, updateWeightsUI); els.wLight?.addEventListener(ev, updateWeightsUI); });
 
-  // APPLY: full-res pipeline with optional sharpen
+  // APPLY: full-res pipeline with optional sharpen + per-color tol/pattern
   els.applyBtn?.addEventListener('click', async ()=>{
-    const pal=getPalette(); if(!pal.length){ alert('Add at least one color.'); return; }
+    const palMeta=getPaletteWithMeta(); if(!palMeta.length){ toast('Add at least one color to the palette first.', 'warn', 2600); alert('Add at least one color.'); return; }
     const wL=parseInt(els.wLight.value,10)/100, wC=parseInt(els.wChroma.value,10)/100;
     const dither=!!els.useDither.checked, bgMode=els.bgMode.value;
 
-    // 1) FULL SIZE processing canvas
+    // FULL SIZE processing canvas
     let procCanvas, pctx;
     let usingFull = !!els.keepFullRes.checked && state.fullBitmap;
     if (usingFull) {
@@ -906,18 +1055,15 @@ function bindEvents(){
       procCanvas.height = dims.h;
       pctx = procCanvas.getContext('2d', { willReadFrequently:true });
       pctx.imageSmoothingEnabled = false;
-      if (o === 1 && state.fullBitmap instanceof ImageBitmap) {
-        pctx.drawImage(state.fullBitmap, 0, 0);
-      } else {
-        drawImageWithOrientation(pctx, state.fullBitmap, dims.w, dims.h, o);
-      }
+      if (o === 1 && state.fullBitmap instanceof ImageBitmap) pctx.drawImage(state.fullBitmap, 0, 0);
+      else drawImageWithOrientation(pctx, state.fullBitmap, dims.w, dims.h, o);
     } else {
       procCanvas=els.srcCanvas;
       pctx=procCanvas.getContext('2d', { willReadFrequently:true });
       pctx.imageSmoothingEnabled=false;
     }
 
-    // 2) Effective regions at procCanvas resolution
+    // Effective regions at procCanvas resolution
     let effectiveRegions=[];
     if(regions.length){
       if(usingFull){
@@ -933,7 +1079,7 @@ function bindEvents(){
       }
     }
 
-    // 3) Generate output at FULL resolution
+    // Generate output at FULL resolution
     const srcData = pctx.getImageData(0,0,procCanvas.width,procCanvas.height);
 
     if (els.useHalftone?.checked) {
@@ -941,20 +1087,20 @@ function bindEvents(){
       const cell=clamp(parseInt(els.dotCell?.value||'6',10),3,64);
       const bgHex=(els.dotBg?.value||'#FFFFFF').toUpperCase();
       const jitter=!!els.dotJitter?.checked;
-      renderHalftone(pctx, srcData, pal, bgHex, cell, jitter, wL, wC, effectiveRegions);
+      renderHalftone(pctx, srcData, palMeta, bgHex, cell, jitter, wL, wC, effectiveRegions);
 
       const fullHalftone = pctx.getImageData(0,0,procCanvas.width,procCanvas.height);
       els.outCanvas._fullImageData = fullHalftone;
 
     } else {
-      let outFull = mapToPalette(srcData, pal, wL, wC, dither, bgMode, effectiveRegions);
+      let outFull = mapToPalette(srcData, palMeta, wL, wC, dither, bgMode, effectiveRegions);
       if (els.sharpenEdges && els.sharpenEdges.checked) {
         outFull = unsharpMask(outFull, 0.35);
       }
       els.outCanvas._fullImageData = outFull;
     }
 
-    // 4) Sharp preview (downscaled only for display)
+    // Sharp preview (downscaled only for display)
     const previewW = Math.min(procCanvas.width, parseInt(els.maxW.value,10));
     const scale    = previewW / procCanvas.width;
     els.outCanvas.width  = Math.round(procCanvas.width  * scale);
@@ -972,6 +1118,7 @@ function bindEvents(){
     octx.drawImage(tmp, 0, 0, els.outCanvas.width, els.outCanvas.height);
 
     els.downloadBtn.disabled = false;
+    toast('Mapped! Preview is scaled for speed; “Download PNG” exports full-res.', 'success', 3600);
   });
 
   // Download PNG (lossless from full-res ImageData)
@@ -990,6 +1137,7 @@ function bindEvents(){
       a.href=URL.createObjectURL(blob);
       a.click();
       setTimeout(()=>URL.revokeObjectURL(a.href), 1500);
+      toast('Saved mapped_fullres.png (full resolution).', 'success', 2600);
     }, 'image/png');
   });
 
@@ -1012,7 +1160,7 @@ function bindEvents(){
 
     const blob=await new Promise(res=>tmp.toBlob(res,'image/png',0.92));
     const rec={ id: state.selectedProjectId||undefined, name, createdAt:Date.now(), updatedAt:Date.now(), settings:getCurrentSettings(), imageBlob:blob };
-    const id=await dbPutProject(rec); state.selectedProjectId=id; await refreshProjectsList(); alert('Saved.');
+    const id=await dbPutProject(rec); state.selectedProjectId=id; await refreshProjectsList(); toast('Project saved. Find it later in Projects → Load.','success',3000);
   });
 
   els.exportProject?.addEventListener('click', async ()=>{
@@ -1021,6 +1169,7 @@ function bindEvents(){
     const b64=await blobToBase64(rec.imageBlob);
     const out={ name:rec.name, createdAt:rec.createdAt, updatedAt:rec.updatedAt, settings:rec.settings, imageBase64:b64 };
     const blob=new Blob([JSON.stringify(out)],{type:'application/json'}); const a=document.createElement('a'); a.download=(rec.name||'project')+'.json'; a.href=URL.createObjectURL(blob); a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+    toast('Project exported as JSON.', 'success', 2400);
   });
 
   els.importProject?.addEventListener('change', async (e)=>{
@@ -1030,7 +1179,7 @@ function bindEvents(){
       if(!obj.imageBase64 || !obj.settings){ alert('Invalid project file.'); return; }
       const blob=base64ToBlob(obj.imageBase64);
       const rec={ name:obj.name||`Imported ${Date.now()}`, createdAt:obj.createdAt||Date.now(), updatedAt:Date.now(), settings:obj.settings, imageBlob:blob };
-      const id=await dbPutProject(rec); await refreshProjectsList(); await loadProject(id); setPane(false); alert('Imported.');
+      const id=await dbPutProject(rec); await refreshProjectsList(); await loadProject(id); setPane(false); toast('Project imported and loaded.','success',2800);
     }catch{ alert('Invalid JSON.'); } finally { e.target.value=''; }
   });
 
@@ -1039,7 +1188,7 @@ function bindEvents(){
     if(!confirm('Delete selected project?')) return; await dbDelete(id); state.selectedProjectId=null; await refreshProjectsList();
   });
 
-  // Desktop alt-click sampler on the preview
+  // Desktop ALT-click sampler on the preview
   els.srcCanvas.addEventListener('click',(evt)=>{
     if(!evt.altKey) return;
     const rect=els.srcCanvas.getBoundingClientRect();
@@ -1047,6 +1196,15 @@ function bindEvents(){
     const y=Math.floor((evt.clientY-rect.top )*els.srcCanvas.height/rect.height);
     const d=sctx.getImageData(x,y,1,1).data; addPaletteRow(rgbToHex(d[0],d[1],d[2]));
     renderCodeList(); updateMailto(); persistPrefs();
+    toast('Color added. Adjust its Tol slider if needed.', 'success', 2200);
+  });
+
+  // Halftone hint
+  els.useHalftone?.addEventListener('change', ()=>{
+    if(els.useHalftone.checked && !tipSeen('halftone_tip')){
+      toast('Dots approximate tone using your palette. Try a smaller Cell for more detail.', 'tip', 4200);
+      markTip('halftone_tip');
+    }
   });
 }
 
@@ -1054,6 +1212,7 @@ function bindEvents(){
 function getCurrentSettings(){
   return {
     palette: getPalette().map(([r,g,b])=>rgbToHex(r,g,b)),
+    paletteMeta: getPaletteWithMeta().map(p=>({ tol:p.tol, pattern:p.pattern })), // persist tol + pattern
     maxW: parseInt(els.maxW.value,10),
     keepFullRes: !!els.keepFullRes.checked,
     sharpenEdges: !!(els.sharpenEdges && els.sharpenEdges.checked),
@@ -1074,7 +1233,9 @@ function getCurrentSettings(){
 }
 function applySettings(s){
   if(!s) return;
-  if(s.palette) setPalette(s.palette);
+  if(s.palette){
+    setPalette(s.palette, s.paletteMeta||null);
+  }
   if(s.maxW) els.maxW.value=s.maxW;
   if('keepFullRes' in s) els.keepFullRes.checked=!!s.keepFullRes;
   if('sharpenEdges' in s && els.sharpenEdges) els.sharpenEdges.checked=!!s.sharpenEdges;
@@ -1082,10 +1243,10 @@ function applySettings(s){
   if(s.wLight) els.wLight.value=s.wLight;
   if('useDither' in s) els.useDither.checked=!!s.useDither;
   if(s.bgMode) els.bgMode.value=s.bgMode;
-  if('useHalftone' in s) els.useHalftone.checked=!!s.useHalftone;
-  if(s.dotCell) els.dotCell.value=s.dotCell;
-  if(s.dotBg) els.dotBg.value=s.dotBg;
-  if('dotJitter' in s) els.dotJitter.checked=!!s.dotJitter;
+  if('useHalftone' in s && els.useHalftone) els.useHalftone.checked=!!s.useHalftone;
+  if(s.dotCell && els.dotCell) els.dotCell.value=s.dotCell;
+  if(s.dotBg && els.dotBg) els.dotBg.value=s.dotBg;
+  if('dotJitter' in s && els.dotJitter) els.dotJitter.checked=!!s.dotJitter;
   if(s.codeMode) state.codeMode = (s.codeMode === CODE_MODES.HEX ? CODE_MODES.HEX : CODE_MODES.PMS);
   updateWeightsUI();
   regions.length=0;
@@ -1095,10 +1256,27 @@ function applySettings(s){
       else { regions.push({ x0:r.x0,y0:r.y0,x1:r.x1,y1:r.y1, allowed:new Set(r.allowed||[]) }); }
     });
   }
+
+  // If paletteMeta provided after DOM is rebuilt, set controls accordingly
+  if(s.palette && s.paletteMeta){
+    const rows=[...els.paletteList.querySelectorAll('.palette-item')];
+    s.paletteMeta.forEach((m,i)=>{
+      const r=rows[i]; if(!r) return;
+      const tol=r.querySelector('.tolRange'); if(tol){ tol.value=clamp(m.tol||100,50,200); r.querySelector('.tolv').textContent=fmtMult(tol.value); }
+      const A=r.querySelector('.patA'), B=r.querySelector('.patB');
+      const en=r.querySelector('.patEnable'), bal=r.querySelector('.patBal'), balv=r.querySelector('.patBalv'), cell=r.querySelector('.patCell');
+      if(typeof m.pattern?.aIdx==='number' && A) A.selectedIndex = clamp(m.pattern.aIdx,0,rows.length-1);
+      if(typeof m.pattern?.bIdx==='number' && B) B.selectedIndex = clamp(m.pattern.bIdx,0,rows.length-1);
+      if(en) en.checked = !!m.pattern?.enabled;
+      if(bal && balv){ bal.value = clamp(m.pattern?.balance||50,0,100); balv.textContent = `${bal.value}%`; }
+      if(cell){ cell.value = clamp(m.pattern?.cell||6,3,64); }
+    });
+  }
 }
 function persistPrefs(){
   const p = {
     lastPalette: getPalette().map(([r,g,b])=>rgbToHex(r,g,b)),
+    lastPaletteMeta: getPaletteWithMeta().map(pm=>({tol:pm.tol, pattern:pm.pattern})),
     keepFullRes: els.keepFullRes.checked,
     sharpenEdges: !!(els.sharpenEdges && els.sharpenEdges.checked),
     maxW: parseInt(els.maxW.value,10),
@@ -1152,9 +1330,12 @@ function scaleMask(mask,w0,h0,w1,h1){
 /////////////////////////////// Init ///////////////////////////////
 async function init(){
   try{
+    ensureToastHost();
+
     // Load prefs
     const prefs=loadPrefs();
-    if(prefs.lastPalette) setPalette(prefs.lastPalette); else setPalette(['#FFFFFF','#000000']);
+    if(prefs.lastPalette) setPalette(prefs.lastPalette, prefs.lastPaletteMeta||null);
+    else setPalette(['#FFFFFF','#000000']);
     if(prefs.keepFullRes!==undefined) els.keepFullRes.checked=!!prefs.keepFullRes;
     if(prefs.sharpenEdges!==undefined && els.sharpenEdges) els.sharpenEdges.checked=!!prefs.sharpenEdges;
     if(prefs.maxW) els.maxW.value=prefs.maxW;
