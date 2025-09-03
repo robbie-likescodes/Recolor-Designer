@@ -1,16 +1,14 @@
-/* Palette Mapper — Cup Print Helper (FULL JS, v8)
-   Features:
-   - Ultra-robust photo attach: Upload (Photo Library), Camera, Drag & Drop, Paste
-   - HEIC/HEIF detection + guidance; EXIF orientation for JPEG fallback
-   - Auto 10-color palette on load (hybrid histogram+K-means, catches minority colors)
-   - Full-screen Editor (Eyedropper w/ preview+Add fix, Lasso regions w/ per-region palette)
-   - Palette mapping in perceptual Lab + optional Floyd–Steinberg dithering
-   - Halftone dots rendering (cell size, jitter, background) + region support
-   - PMS/HEX toggle (default PMS) with nearest PMS lookup (JSON swatch lib)
-   - Printer TXT report + email body generator (attach PNG/TXT manually)
-   - Full-resolution exports (no blur) + imageSmoothing disabled where needed
-   - Projects via IndexedDB (save/export/import/delete) + Saved palettes via localStorage
-   - Mobile-friendly; non-passive pointer listeners to avoid iOS Safari highlights
+/* Palette Mapper — Cup Print Helper (FULL JS v9)
+   Includes:
+   - Full-res pipeline for razor-sharp export (no resampling; smoothing off)
+   - Optional edge sharpen (checkbox id="sharpenEdges")
+   - Robust uploads (Photo Library/Camera/Drag&Drop/Paste), HEIC guard, EXIF orientation
+   - Hybrid auto-palette (histogram + K-means), 10 colors default on load
+   - Full-screen editor (eyedropper + lasso regions with per-region palette)
+   - Palette mapping (Lab) + Floyd–Steinberg dithering
+   - Halftone dots renderer
+   - PMS/HEX toggle with nearest PMS (JSON lib) + report + mailto
+   - Projects via IndexedDB, saved palettes via localStorage
 */
 
 /////////////////////////////// DOM ///////////////////////////////
@@ -22,6 +20,7 @@ const els = {
   resetBtn: document.getElementById('resetBtn'),
   maxW: document.getElementById('maxW'),
   keepFullRes: document.getElementById('keepFullRes'),
+  sharpenEdges: document.getElementById('sharpenEdges'), // optional checkbox
   srcCanvas: document.getElementById('srcCanvas'),
   outCanvas: document.getElementById('outCanvas'),
 
@@ -63,13 +62,6 @@ const els = {
   savePalette: document.getElementById('savePalette'),
   clearSavedPalettes: document.getElementById('clearSavedPalettes'),
 
-  // Legacy region card (kept for IDs)
-  regionCard: document.querySelector('.card h2')?.textContent?.toLowerCase().includes('region')
-              ? document.querySelector('.card h2')?.closest('.card') : null,
-  regionMode: document.getElementById('regionMode'),
-  regionClear: document.getElementById('regionClear'),
-  regionConfig: document.getElementById('regionConfig'),
-
   // Full-screen editor overlay
   openEditor: document.getElementById('openEditor'),
   editorOverlay: document.getElementById('editorOverlay'),
@@ -104,19 +96,15 @@ octx.imageSmoothingEnabled = false;
 
 /////////////////////////////// State ///////////////////////////////
 const state = {
-  fullBitmap: null,     // ImageBitmap or HTMLImageElement (original file)
+  fullBitmap: null,   // ImageBitmap or HTMLImageElement (original)
   fullW: 0,
   fullH: 0,
-  exifOrientation: 1,   // 1..8; 1=normal (only used in fallback path)
+  exifOrientation: 1, // 1..8
   selectedProjectId: null,
-  codeMode: 'pms',      // 'pms' | 'hex'
+  codeMode: 'pms',    // 'pms' | 'hex'
 };
 
-const regions = []; // lasso polygons or (legacy) rects
-/*
-  Rect: { x0,y0,x1,y1, allowed:Set<number> }
-  Poly: { type:'polygon', points:[[x,y]...](preview coords), mask:Uint8Array, allowed:Set<number> }
-*/
+const regions = []; // lasso polygons / rects
 const editor = {
   active:false, tool:'eyedrop',
   ectx:null, octx:null, lassoPts:[], lassoActive:false,
@@ -168,7 +156,7 @@ function isLikelyJpeg(file){
   const ext=(file.name||'').split('.').pop().toLowerCase();
   return t.includes('jpeg') || t.includes('jpg') || ext==='jpg' || ext==='jpeg';
 }
-// Minimal EXIF orientation parse (returns 1..8; 1 if unknown)
+// Minimal EXIF orientation parse
 async function readJpegOrientation(file){
   return new Promise((resolve) => {
     const reader = new FileReader();
@@ -254,7 +242,7 @@ function renderSavedPalettes(){
   if(!els.savedPalettes) return;
   const list=loadSavedPalettes(); els.savedPalettes.innerHTML='';
   list.forEach((p,idx)=>{ const div=document.createElement('div'); div.className='item';
-    const sw=p.colors.map(h=>`<span title="${h}" style="display:inline-block;width:16px;height:16px;border-radius:4px;border:1px solid #334155;background:${h}"></span>`).join('');
+    const sw=p.colors.map(h=>`<span class="sw" title="${h}" style="display:inline-block;width:16px;height:16px;border-radius:4px;border:1px solid #334155;background:${h}"></span>`).join('');
     div.innerHTML=`<div><strong>${p.name||('Palette '+(idx+1))}</strong><br><small>${p.colors.join(', ')}</small></div><div>${sw}</div>`;
     div.addEventListener('click',()=>{ setPalette(p.colors); renderCodeList(); updateMailto(); persistPrefs(); });
     els.savedPalettes.appendChild(div);
@@ -293,7 +281,6 @@ function toggleImageActions(enable){
 /////////////////////////////// Robust Attachment ///////////////////////////////
 function objectUrlFor(file){ return URL.createObjectURL(file); }
 function revokeUrl(url){ try{ URL.revokeObjectURL(url); }catch{} }
-
 function loadImage(url){
   return new Promise((resolve,reject)=>{
     const img=new Image(); img.decoding='async';
@@ -301,15 +288,14 @@ function loadImage(url){
     img.src=url;
   });
 }
-
 async function handleFile(file, source='file'){
   try{
     if(!file) return;
-
     if (isHeicFile(file)) { heicNotSupportedMessage(); return; }
 
     state.exifOrientation = 1;
 
+    // Fast path: createImageBitmap with EXIF
     if (typeof createImageBitmap === 'function') {
       try{
         const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
@@ -318,7 +304,7 @@ async function handleFile(file, source='file'){
       }catch(e){ console.warn('createImageBitmap failed:', e); }
     }
 
-    // Fallback: <img> + EXIF orientation for JPEG
+    // Fallback: <img> + manual EXIF orientation for JPEG
     const url = objectUrlFor(file);
     try{
       const img = await loadImage(url);
@@ -335,7 +321,6 @@ async function handleFile(file, source='file'){
     console.error('Image load error:', err);
     alert('Could not open that image. Try a JPG/PNG or a different photo.');
   } finally {
-    // allow re-selecting same file
     if (els.fileInput) els.fileInput.value = '';
     if (els.cameraInput) els.cameraInput.value = '';
   }
@@ -355,7 +340,7 @@ function rgbToLab(r,g,b){ const [x,y,z]=rgbToXyz(r,g,b); return xyzToLab(x,y,z);
 function deltaE2Weighted(l1,l2,wL,wC){ const dL=l1[0]-l2[0], da=l1[1]-l2[1], db=l1[2]-l2[2]; return wL*dL*dL + wC*(da*da+db*db); }
 function buildPaletteLab(pal){ return pal.map(([r,g,b])=>({ rgb:[r,g,b], lab:rgbToLab(r,g,b) })); }
 
-/////////////////////////////// Mapping (palette or halftone) ///////////////////////////////
+/////////////////////////////// Mapping (palette / halftone) ///////////////////////////////
 function mapToPalette(imgData, palette, wL=1.0, wC=1.0, dither=false, bgMode='keep', effRegions=[]){
   const w=imgData.width, h=imgData.height, src=imgData.data;
   const out=new ImageData(w,h); out.data.set(src);
@@ -446,7 +431,7 @@ function renderHalftone(ctx, imgData, palette, bgHex, cellSize=6, jitter=false, 
   const palLab=buildPaletteLab(palette);
   const bg=hexToRgb(bgHex)||{r:255,g:255,b:255}; const bgLab=rgbToLab(bg.r,bg.g,b.b);
 
-  ctx.save(); ctx.fillStyle=rgbToHex(bg.r,bg.g,bg.b); ctx.fillRect(0,0,w,h);
+  ctx.save(); ctx.fillStyle=rgbToHex(bg.r,b.g?bg.g:0,b.b?b.b:0); ctx.fillStyle = rgbToHex(bg.r,bg.g,bg.b); ctx.fillRect(0,0,w,h);
 
   for(let y=0;y<h;y+=cellSize){
     for(let x=0;x<w;x+=cellSize){
@@ -494,39 +479,6 @@ function kmeans(data,k=5,iters=10){
   }
   return centers;
 }
-function sampleImageDataForClustering(ctx, w, h, targetPixels = 120000) {
-  const step = Math.max(1, Math.floor(Math.sqrt((w * h) / targetPixels)));
-  const outW = Math.floor(w / step), outH = Math.floor(h / step);
-  const sampled = new Uint8ClampedArray(outW * outH * 4);
-  let si = 0;
-  for (let y = 0; y < h; y += step) {
-    const row = ctx.getImageData(0, y, w, 1).data;
-    for (let x = 0; x < w; x += step) {
-      const i = x * 4;
-      sampled[si++] = row[i];
-      sampled[si++] = row[i + 1];
-      sampled[si++] = row[i + 2];
-      sampled[si++] = row[i + 3];
-    }
-  }
-  return sampled;
-}
-function countClusterSizes(centers, data) {
-  const counts = new Array(centers.length).fill(0);
-  const n = data.length / 4;
-  for (let i = 0; i < n; i++) {
-    const r = data[i*4], g = data[i*4+1], b = data[i*4+2], a = data[i*4+3];
-    if (a === 0) continue;
-    let best = 0, bestD = Infinity;
-    for (let c = 0; c < centers.length; c++) {
-      const dr = r - centers[c][0], dg = g - centers[c][1], db = b - centers[c][2];
-      const d = dr*dr + dg*dg + db*db;
-      if (d < bestD) { bestD = d; best = c; }
-    }
-    counts[best]++;
-  }
-  return counts;
-}
 function kmeansFromSeeds(data, k, seeds, iters=8){
   const picked = [];
   for (let i=0;i<k;i++) picked.push(seeds[Math.floor((i+0.5)*seeds.length/k)]);
@@ -546,14 +498,31 @@ function kmeansFromSeeds(data, k, seeds, iters=8){
   }
   return centers;
 }
+function sampleImageDataForClustering(ctx, w, h, targetPixels = 120000) {
+  const step = Math.max(1, Math.floor(Math.sqrt((w * h) / targetPixels)));
+  const outW = Math.floor(w / step), outH = Math.floor(h / step);
+  const sampled = new Uint8ClampedArray(outW * outH * 4);
+  let si = 0;
+  for (let y = 0; y < h; y += step) {
+    const row = ctx.getImageData(0, y, w, 1).data;
+    for (let x = 0; x < w; x += step) {
+      const i = x * 4;
+      sampled[si++] = row[i];
+      sampled[si++] = row[i + 1];
+      sampled[si++] = row[i + 2];
+      sampled[si++] = row[i + 3];
+    }
+  }
+  return sampled;
+}
 function autoPaletteFromCanvasHybrid(canvas, k = 10) {
   if (!canvas || !canvas.width) return;
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   const w = canvas.width, h = canvas.height;
   const img = ctx.getImageData(0,0,w,h).data;
 
-  // 1) 5-bit histogram
-  const bins = new Map(); // 32x32x32 grid
+  // 5-bit histogram (32^3 bins)
+  const bins = new Map();
   for (let i = 0; i < img.length; i += 4) {
     const a = img[i+3]; if (a < 16) continue;
     const r = img[i]>>3, g = img[i+1]>>3, b = img[i+2]>>3;
@@ -570,10 +539,8 @@ function autoPaletteFromCanvasHybrid(canvas, k = 10) {
       return [r,g,b];
     });
 
-  // 3) short K-means from seeds → k finals
-  const dataForKm = new Uint8ClampedArray(w*h*4);
-  dataForKm.set(img);
-  const centers = kmeansFromSeeds(dataForKm, k, ranked, 8);
+  // Use sampled (down) data for k-means init
+  const centers = kmeansFromSeeds(img, k, ranked, 8);
   const hexes = centers.map(([r,g,b])=>rgbToHex(r,g,b));
   setPalette(hexes);
 }
@@ -581,14 +548,9 @@ function autoPaletteFromCanvasHybrid(canvas, k = 10) {
 /////////////////////////////// PMS / HEX display & reporting ///////////////////////////////
 let PMS_LIB = [];
 const PMS_CACHE = new Map(); // hex -> {name, hex, deltaE}
-
 async function loadPmsJson(url='pms_solid_coated.json'){
-  try {
-    PMS_LIB = await (await fetch(url, {cache:'no-store'})).json();
-  } catch (e) {
-    console.warn('PMS library not loaded', e);
-    PMS_LIB = [];
-  }
+  try { PMS_LIB = await (await fetch(url, {cache:'no-store'})).json(); }
+  catch (e) { console.warn('PMS library not loaded', e); PMS_LIB = []; }
 }
 function nearestPms(hex){
   if (PMS_CACHE.has(hex)) return PMS_CACHE.get(hex);
@@ -637,7 +599,7 @@ function buildPrinterReportByMode(){
   return lines.join('\n');
 }
 function updateMailto(){
-  const to = ''; // optional default printer email
+  const to = '';
   const subject = encodeURIComponent(
     state.codeMode === CODE_MODES.PMS ? 'Print job: artwork + PMS palette' : 'Print job: artwork + HEX palette'
   );
@@ -681,20 +643,17 @@ function openEditor(){
   if(!state.fullBitmap){ alert('Load an image first.'); return; }
   els.editorOverlay?.classList.remove('hidden'); els.editorOverlay?.setAttribute('aria-hidden','false'); editor.active=true;
 
-  // Ensure editor sidebar is above overlay so buttons are clickable (z-index via style hook)
   const sidebar = document.querySelector('.editor-right');
   if (sidebar) { sidebar.style.zIndex = 3; sidebar.style.position = 'relative'; }
   if (els.editOverlay) els.editOverlay.style.zIndex = 1;
 
-  const vw=window.innerWidth, vh=window.innerHeight; const rightW=(vw>900)?320:0, toolbarH=50;
+  const vw=window.innerWidth, vh=window.innerHeight; const rightW=(vw>900)?320:0, toolbarH=46;
   els.editCanvas.width=vw-rightW; els.editCanvas.height=vh-toolbarH;
   els.editOverlay.width=els.editCanvas.width; els.editOverlay.height=els.editCanvas.height;
   editor.ectx=els.editCanvas.getContext('2d',{willReadFrequently:true});
   editor.octx=els.editOverlay.getContext('2d',{willReadFrequently:true});
-  editor.ectx.imageSmoothingEnabled=false;
-  editor.octx.imageSmoothingEnabled=false;
+  editor.ectx.imageSmoothingEnabled=false; editor.octx.imageSmoothingEnabled=false;
 
-  // Draw the current preview into editor space
   editor.ectx.clearRect(0,0,els.editCanvas.width,els.editCanvas.height);
   editor.ectx.drawImage(els.srcCanvas,0,0,els.editCanvas.width,els.editCanvas.height);
 
@@ -837,6 +796,37 @@ function wireCodesUI(){
   updateMailto();
 }
 
+/////////////////////////////// Edge Sharpen (optional) ///////////////////////////////
+function unsharpMask(imageData, amount=0.35){
+  // Simple 3x3 sharpen kernel
+  const w=imageData.width, h=imageData.height, src=imageData.data;
+  const out=new ImageData(w,h);
+  out.data.set(src); // start from original for borders
+  const k=[0,-1,0,-1,5,-1,0,-1,0];
+
+  for(let y=1;y<h-1;y++){
+    for(let x=1;x<w-1;x++){
+      let r=0,g=0,b=0;
+      let ki=0;
+      for(let dy=-1;dy<=1;dy++){
+        for(let dx=-1;dx<=1;dx++,ki++){
+          const i=((y+dy)*w+(x+dx))*4;
+          const kv=k[ki];
+          r += src[i  ] * kv;
+          g += src[i+1] * kv;
+          b += src[i+2] * kv;
+        }
+      }
+      const o=(y*w+x)*4;
+      out.data[o  ] = clamp((1-amount)*src[o  ] + amount*r, 0,255);
+      out.data[o+1] = clamp((1-amount)*src[o+1] + amount*g, 0,255);
+      out.data[o+2] = clamp((1-amount)*src[o+2] + amount*b, 0,255);
+      out.data[o+3] = src[o+3];
+    }
+  }
+  return out;
+}
+
 /////////////////////////////// UI Actions ///////////////////////////////
 function updateWeightsUI(){ if(els.wChromaOut) els.wChromaOut.textContent=fmtMult(els.wChroma.value); if(els.wLightOut) els.wLightOut.textContent=fmtMult(els.wLight.value); }
 
@@ -845,17 +835,12 @@ function bindEvents(){
   els.fileInput?.addEventListener('change', e=>{ const f=e.target.files?.[0]; if(f) handleFile(f,'file'); });
   els.cameraInput?.addEventListener('change', e=>{ const f=e.target.files?.[0]; if(f) handleFile(f,'camera'); });
 
-  // Drag & Drop (desktop)
+  // Drag & Drop
   const prevent=(e)=>{ e.preventDefault(); e.stopPropagation(); };
-  ['dragenter','dragover','dragleave','drop'].forEach(ev=>{
-    window.addEventListener(ev, prevent, { passive:false });
-  });
-  window.addEventListener('drop', (e)=>{
-    const dt=e.dataTransfer; const f=dt && dt.files && dt.files[0];
-    if(f) handleFile(f,'drop');
-  }, { passive:false });
+  ['dragenter','dragover','dragleave','drop'].forEach(ev=>{ window.addEventListener(ev, prevent, { passive:false }); });
+  window.addEventListener('drop', (e)=>{ const dt=e.dataTransfer; const f=dt && dt.files && dt.files[0]; if(f) handleFile(f,'drop'); }, { passive:false });
 
-  // Paste button (desktop)
+  // Paste button
   els.pasteBtn?.addEventListener('click', async ()=>{
     if(!navigator.clipboard || !navigator.clipboard.read){ alert('Clipboard image paste not supported on this browser. Use Upload instead.'); return; }
     try{
@@ -875,9 +860,8 @@ function bindEvents(){
     }catch(err){ console.warn('paste error',err); }
   });
 
-  // Reset/preview resize
+  // Reset
   els.resetBtn?.addEventListener('click', ()=>{ if(!state.fullBitmap) return; drawPreviewFromState(); });
-  els.maxW?.addEventListener('change', ()=>{ if(state.fullBitmap) drawPreviewFromState(); });
 
   // Palette
   els.addColor?.addEventListener('click', ()=>{ addPaletteRow('#FFFFFF'); renderCodeList(); updateMailto(); persistPrefs(); });
@@ -902,35 +886,38 @@ function bindEvents(){
     renderCodeList(); updateMailto(); persistPrefs();
   });
 
-  // Weights out
+  // Weight outputs
   ['input','change'].forEach(ev=>{ els.wChroma?.addEventListener(ev, updateWeightsUI); els.wLight?.addEventListener(ev, updateWeightsUI); });
 
-  // Apply mapping
+  // APPLY: full-res pipeline with optional sharpen
   els.applyBtn?.addEventListener('click', async ()=>{
-    const pal=getPalette(); if(!pal.length){ alert('Add at least one color to the palette.'); return; }
+    const pal=getPalette(); if(!pal.length){ alert('Add at least one color.'); return; }
     const wL=parseInt(els.wLight.value,10)/100, wC=parseInt(els.wChroma.value,10)/100;
     const dither=!!els.useDither.checked, bgMode=els.bgMode.value;
 
-    // Build processing canvas (preview or full res)
-    let procCanvas, pctx, usingFull=false;
-    if(els.keepFullRes.checked && state.fullBitmap){
-      usingFull=true;
-      const baseW=state.fullW, baseH=state.fullH, o=state.exifOrientation||1;
-      const {w:ow, h:oh} = getOrientedDims(o, baseW, baseH);
-      procCanvas=document.createElement('canvas'); procCanvas.width=ow; procCanvas.height=oh;
-      pctx=procCanvas.getContext('2d',{willReadFrequently:true});
-      pctx.imageSmoothingEnabled=false;
-      if (o===1 && state.fullBitmap instanceof ImageBitmap){
-        pctx.drawImage(state.fullBitmap,0,0,ow,oh);
+    // 1) FULL SIZE processing canvas
+    let procCanvas, pctx;
+    let usingFull = !!els.keepFullRes.checked && state.fullBitmap;
+    if (usingFull) {
+      const baseW = state.fullW, baseH = state.fullH, o = state.exifOrientation || 1;
+      const dims = getOrientedDims(o, baseW, baseH);
+      procCanvas = document.createElement('canvas');
+      procCanvas.width  = dims.w;
+      procCanvas.height = dims.h;
+      pctx = procCanvas.getContext('2d', { willReadFrequently:true });
+      pctx.imageSmoothingEnabled = false;
+      if (o === 1 && state.fullBitmap instanceof ImageBitmap) {
+        pctx.drawImage(state.fullBitmap, 0, 0);
       } else {
-        drawImageWithOrientation(pctx, state.fullBitmap, ow, oh, o);
+        drawImageWithOrientation(pctx, state.fullBitmap, dims.w, dims.h, o);
       }
     } else {
-      procCanvas=els.srcCanvas; pctx=procCanvas.getContext('2d',{willReadFrequently:true});
+      procCanvas=els.srcCanvas;
+      pctx=procCanvas.getContext('2d', { willReadFrequently:true });
       pctx.imageSmoothingEnabled=false;
     }
 
-    // Effective regions (scale to full if needed)
+    // 2) Effective regions at procCanvas resolution
     let effectiveRegions=[];
     if(regions.length){
       if(usingFull){
@@ -946,63 +933,64 @@ function bindEvents(){
       }
     }
 
+    // 3) Generate output at FULL resolution
+    const srcData = pctx.getImageData(0,0,procCanvas.width,procCanvas.height);
+
     if (els.useHalftone?.checked) {
-      const srcData = pctx.getImageData(0,0,procCanvas.width,procCanvas.height);
+      pctx.clearRect(0,0,procCanvas.width,procCanvas.height);
       const cell=clamp(parseInt(els.dotCell?.value||'6',10),3,64);
       const bgHex=(els.dotBg?.value||'#FFFFFF').toUpperCase();
       const jitter=!!els.dotJitter?.checked;
-
-      pctx.clearRect(0,0,procCanvas.width,procCanvas.height);
       renderHalftone(pctx, srcData, pal, bgHex, cell, jitter, wL, wC, effectiveRegions);
 
-      if(usingFull){
-        const previewW=Math.min(procCanvas.width, parseInt(els.maxW.value,10));
-        const scale=previewW/procCanvas.width;
-        els.outCanvas.width=Math.round(procCanvas.width*scale); els.outCanvas.height=Math.round(procCanvas.height*scale);
-        octx.clearRect(0,0,els.outCanvas.width,els.outCanvas.height);
-        octx.imageSmoothingEnabled=false;
-        octx.drawImage(procCanvas,0,0,els.outCanvas.width,els.outCanvas.height);
-        els.outCanvas._fullImageData = pctx.getImageData(0,0,procCanvas.width,procCanvas.height);
-      } else {
-        const outData=pctx.getImageData(0,0,procCanvas.width,procCanvas.height);
-        els.outCanvas.width=outData.width; els.outCanvas.height=outData.height; octx.putImageData(outData,0,0);
-        els.outCanvas._fullImageData = outData;
-      }
-      els.downloadBtn.disabled=false; return;
-    }
+      const fullHalftone = pctx.getImageData(0,0,procCanvas.width,procCanvas.height);
+      els.outCanvas._fullImageData = fullHalftone;
 
-    // Pixel mapping path
-    const imgData=pctx.getImageData(0,0,procCanvas.width,procCanvas.height);
-    const out=mapToPalette(imgData,pal,wL,wC,dither,bgMode,effectiveRegions);
-
-    if(usingFull){
-      const previewW=Math.min(procCanvas.width, parseInt(els.maxW.value,10));
-      const scale=previewW/procCanvas.width;
-      els.outCanvas.width=Math.round(procCanvas.width*scale); els.outCanvas.height=Math.round(procCanvas.height*scale);
-      const off=(typeof OffscreenCanvas!=='undefined')? new OffscreenCanvas(procCanvas.width,procCanvas.height) : Object.assign(document.createElement('canvas'),{width:procCanvas.width,height:procCanvas.height});
-      const offCtx=off.getContext('2d'); offCtx.imageSmoothingEnabled=false; offCtx.putImageData(out,0,0);
-      let bmp; if(off.convertToBlob){ const blob=await off.convertToBlob(); bmp=await createImageBitmap(blob); } else { const blob=await new Promise(res=>off.toBlob(res)); bmp=await createImageBitmap(blob); }
-      octx.clearRect(0,0,els.outCanvas.width,els.outCanvas.height); octx.imageSmoothingEnabled=false; octx.drawImage(bmp,0,0,els.outCanvas.width,els.outCanvas.height);
-      els.outCanvas._fullImageData=out;
     } else {
-      els.outCanvas.width=out.width; els.outCanvas.height=out.height; octx.putImageData(out,0,0); els.outCanvas._fullImageData=out;
+      let outFull = mapToPalette(srcData, pal, wL, wC, dither, bgMode, effectiveRegions);
+      if (els.sharpenEdges && els.sharpenEdges.checked) {
+        outFull = unsharpMask(outFull, 0.35);
+      }
+      els.outCanvas._fullImageData = outFull;
     }
-    els.downloadBtn.disabled=false;
+
+    // 4) Sharp preview (downscaled only for display)
+    const previewW = Math.min(procCanvas.width, parseInt(els.maxW.value,10));
+    const scale    = previewW / procCanvas.width;
+    els.outCanvas.width  = Math.round(procCanvas.width  * scale);
+    els.outCanvas.height = Math.round(procCanvas.height * scale);
+    octx.clearRect(0,0,els.outCanvas.width,els.outCanvas.height);
+    octx.imageSmoothingEnabled = false;
+
+    const tmp = document.createElement('canvas');
+    tmp.width = els.outCanvas._fullImageData.width;
+    tmp.height = els.outCanvas._fullImageData.height;
+    const tctx = tmp.getContext('2d', { willReadFrequently:true });
+    tctx.imageSmoothingEnabled = false;
+    tctx.putImageData(els.outCanvas._fullImageData, 0, 0);
+
+    octx.drawImage(tmp, 0, 0, els.outCanvas.width, els.outCanvas.height);
+
+    els.downloadBtn.disabled = false;
   });
 
-  // Download PNG (full-res if available)
+  // Download PNG (lossless from full-res ImageData)
   els.downloadBtn?.addEventListener('click', ()=>{
-    const out=els.outCanvas._fullImageData;
-    if(out){
-      const c=document.createElement('canvas'); c.width=out.width; c.height=out.height;
-      const cx=c.getContext('2d',{ willReadFrequently:true }); cx.imageSmoothingEnabled=false;
-      cx.putImageData(out,0,0);
-      c.toBlob(blob=>{ const a=document.createElement('a'); a.download='mapped_fullres.png'; a.href=URL.createObjectURL(blob); a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),2000); }, 'image/png');
-    } else {
-      const c=document.createElement('canvas'); c.width=els.outCanvas.width; c.height=els.outCanvas.height;
-      const cx=c.getContext('2d'); cx.imageSmoothingEnabled=false; cx.drawImage(els.outCanvas,0,0);
-      c.toBlob(blob=>{ const a=document.createElement('a'); a.download='mapped_preview.png'; a.href=URL.createObjectURL(blob); a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),2000); }, 'image/png');
-    }
+    const full = els.outCanvas._fullImageData;
+    if (!full) { alert('Nothing to export yet.'); return; }
+    const c = document.createElement('canvas');
+    c.width  = full.width;
+    c.height = full.height;
+    const cx = c.getContext('2d', { willReadFrequently:true });
+    cx.imageSmoothingEnabled = false;
+    cx.putImageData(full, 0, 0);
+    c.toBlob(blob=>{
+      const a=document.createElement('a');
+      a.download='mapped_fullres.png';
+      a.href=URL.createObjectURL(blob);
+      a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href), 1500);
+    }, 'image/png');
   });
 
   // Projects pane & actions
@@ -1014,7 +1002,7 @@ function bindEvents(){
     if(!state.fullBitmap){ alert('Load an image first.'); return; }
     const name=prompt('Project name?')||`Project ${Date.now()}`;
 
-    // Save oriented original as PNG (so re-load has correct rotation)
+    // Save oriented original as PNG
     const o=state.exifOrientation||1;
     const {w:ow,h:oh}=getOrientedDims(o,state.fullW,state.fullH);
     const tmp=document.createElement('canvas'); tmp.width=ow; tmp.height=oh; const tc=tmp.getContext('2d');
@@ -1068,6 +1056,7 @@ function getCurrentSettings(){
     palette: getPalette().map(([r,g,b])=>rgbToHex(r,g,b)),
     maxW: parseInt(els.maxW.value,10),
     keepFullRes: !!els.keepFullRes.checked,
+    sharpenEdges: !!(els.sharpenEdges && els.sharpenEdges.checked),
     wChroma: parseInt(els.wChroma.value,10),
     wLight: parseInt(els.wLight.value,10),
     useDither: !!els.useDither.checked,
@@ -1088,6 +1077,7 @@ function applySettings(s){
   if(s.palette) setPalette(s.palette);
   if(s.maxW) els.maxW.value=s.maxW;
   if('keepFullRes' in s) els.keepFullRes.checked=!!s.keepFullRes;
+  if('sharpenEdges' in s && els.sharpenEdges) els.sharpenEdges.checked=!!s.sharpenEdges;
   if(s.wChroma) els.wChroma.value=s.wChroma;
   if(s.wLight) els.wLight.value=s.wLight;
   if('useDither' in s) els.useDither.checked=!!s.useDither;
@@ -1110,6 +1100,7 @@ function persistPrefs(){
   const p = {
     lastPalette: getPalette().map(([r,g,b])=>rgbToHex(r,g,b)),
     keepFullRes: els.keepFullRes.checked,
+    sharpenEdges: !!(els.sharpenEdges && els.sharpenEdges.checked),
     maxW: parseInt(els.maxW.value,10),
     wChroma: parseInt(els.wChroma.value,10),
     wLight: parseInt(els.wLight.value,10),
@@ -1149,34 +1140,38 @@ async function refreshProjectsList(){
   });
 }
 
+/////////////////////////////// Mask scaling helper ///////////////////////////////
+function scaleMask(mask,w0,h0,w1,h1){
+  const c0=document.createElement('canvas'); c0.width=w0; c0.height=h0; const x0=c0.getContext('2d'); const id0=x0.createImageData(w0,h0);
+  for(let i=0;i<w0*h0;i++){ const k=i*4; id0.data[k]=255; id0.data[k+1]=255; id0.data[k+2]=255; id0.data[k+3]=mask[i]?255:0; }
+  x0.putImageData(id0,0,0);
+  const c1=document.createElement('canvas'); c1.width=w1; c1.height=h1; const x1=c1.getContext('2d'); x1.imageSmoothingEnabled=false; x1.drawImage(c0,0,0,w0,h0,0,0,w1,h1);
+  const out=new Uint8Array(w1*h1); const id1=x1.getImageData(0,0,w1,h1).data; for(let i=0;i<w1*h1;i++) out[i]=id1[i*4+3]>0?1:0; return out;
+}
+
 /////////////////////////////// Init ///////////////////////////////
 async function init(){
   try{
-    // Hide legacy region UI on main page
-    if(els.regionCard) els.regionCard.style.display='none';
-    if(els.regionMode){ els.regionMode.checked=false; els.regionMode.disabled=true; }
-    if(els.regionClear){ els.regionClear.disabled=true; }
-    if(els.regionConfig){ els.regionConfig.hidden=true; }
-
     // Load prefs
     const prefs=loadPrefs();
     if(prefs.lastPalette) setPalette(prefs.lastPalette); else setPalette(['#FFFFFF','#000000']);
     if(prefs.keepFullRes!==undefined) els.keepFullRes.checked=!!prefs.keepFullRes;
+    if(prefs.sharpenEdges!==undefined && els.sharpenEdges) els.sharpenEdges.checked=!!prefs.sharpenEdges;
     if(prefs.maxW) els.maxW.value=prefs.maxW;
     if(prefs.wChroma) els.wChroma.value=prefs.wChroma;
     if(prefs.wLight) els.wLight.value=prefs.wLight;
     if(prefs.bgMode) els.bgMode.value=prefs.bgMode;
     if(prefs.useDither!==undefined) els.useDither.checked=!!prefs.useDither;
-    if(prefs.useHalftone!==undefined) els.useHalftone.checked=!!prefs.useHalftone;
-    if(prefs.dotCell) els.dotCell.value=prefs.dotCell;
-    if(prefs.dotBg) els.dotBg.value=prefs.dotBg;
-    if(prefs.dotJitter!==undefined) els.dotJitter.checked=!!prefs.dotJitter;
+    if(prefs.useHalftone!==undefined && els.useHalftone) els.useHalftone.checked=!!prefs.useHalftone;
+    if(prefs.dotCell && els.dotCell) els.dotCell.value=prefs.dotCell;
+    if(prefs.dotBg && els.dotBg) els.dotBg.value=prefs.dotBg;
+    if(prefs.dotJitter!==undefined && els.dotJitter) els.dotJitter.checked=!!prefs.dotJitter;
     state.codeMode = (prefs.codeMode === CODE_MODES.HEX ? CODE_MODES.HEX : CODE_MODES.PMS);
     if (els.colorCodeMode) els.colorCodeMode.value = state.codeMode;
 
     updateWeightsUI(); renderSavedPalettes();
 
-    // Load PMS library once
+    // Load PMS library
     await loadPmsJson();
 
     // Wire codes UI now that PMS is available
@@ -1189,12 +1184,3 @@ async function init(){
 
 bindEvents();
 window.addEventListener('load', init);
-
-/////////////////////////////// Helpers (mask scaling) ///////////////////////////////
-function scaleMask(mask,w0,h0,w1,h1){
-  const c0=document.createElement('canvas'); c0.width=w0; c0.height=h0; const x0=c0.getContext('2d'); const id0=x0.createImageData(w0,h0);
-  for(let i=0;i<w0*h0;i++){ const k=i*4; id0.data[k]=255; id0.data[k+1]=255; id0.data[k+2]=255; id0.data[k+3]=mask[i]?255:0; }
-  x0.putImageData(id0,0,0);
-  const c1=document.createElement('canvas'); c1.width=w1; c1.height=h1; const x1=c1.getContext('2d'); x1.imageSmoothingEnabled=false; x1.drawImage(c0,0,0,w0,h0,0,0,w1,h1);
-  const out=new Uint8Array(w1*h1); const id1=x1.getImageData(0,0,w1,h1).data; for(let i=0;i<w1*h1;i++) out[i]=id1[i*4+3]>0?1:0; return out;
-}
