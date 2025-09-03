@@ -79,10 +79,29 @@ canvas{ display:block; width:100%; height:auto; background:#0a142b; border:1px s
 
 /* Palette */
 .palette-list{ margin-bottom:8px; }
-.palette-item{ display:flex; align-items:center; gap:6px; padding:6px; margin:6px 0;
-  background:#0a132a; border:1px solid var(--line); border-radius:8px; }
+.palette-item{
+  display:flex; flex-direction:column; gap:6px;
+  padding:8px; margin:8px 0;
+  background:#0a132a; border:1px solid var(--line); border-radius:8px;
+}
+.palette-item .palette-main{
+  display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+}
 .palette-item input[type="color"]{ width:36px; height:28px; }
-.palette-item input[type="text"]{ width:90px; font-family:ui-monospace,monospace; }
+.palette-item input[type="text"]{ width:98px; font-family:ui-monospace,monospace; }
+.palette-item .tol{ display:inline-flex; align-items:center; gap:6px; }
+.palette-item .tol span:first-child{ color:var(--muted); font-size:12px; }
+.palette-item .tol .tolv{ min-width:42px; text-align:right; }
+.palette-item details.pattern{
+  border-top:1px dashed var(--line); padding-top:6px; margin-top:2px;
+}
+.palette-item details.pattern summary{
+  cursor:pointer; color:#dbeafe;
+  list-style:none; outline:none;
+}
+.palette-item .patrow{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:6px; }
+.palette-item .patrow label{ display:inline-flex; align-items:center; gap:6px; }
+.palette-item select{ padding:6px 8px; border-radius:8px; border:1px solid var(--line); background:#0b1326; color:var(--ink); }
 
 /* Saved palettes */
 .saved-list .item{ display:flex; justify-content:space-between; align-items:center;
@@ -100,7 +119,7 @@ canvas{ display:block; width:100%; height:auto; background:#0a142b; border:1px s
 .projects{ position:fixed; top:0; right:-380px; width:360px; bottom:0;
   background:#0b1225; border-left:1px solid var(--line); padding:12px; transition:right .25s ease; z-index:10; }
 .projects.open{ right:0; }
-.projects-head{ display:flex; justify-content:space-between; }
+.projects-head{ display:flex; justify-content:space-between; align-items:center; }
 .projects-actions{ margin:8px 0; }
 .projects-list .item{ display:flex; justify-content:space-between; align-items:center;
   padding:8px; margin:6px 0; border:1px solid var(--line); border-radius:8px; background:#0a132a; cursor:pointer; }
@@ -119,6 +138,10 @@ canvas{ display:block; width:100%; height:auto; background:#0a142b; border:1px s
   padding:10px; overflow:auto; z-index:3; }
 .editor-right h3{ margin:8px 0 6px; }
 .editor-right .sw{ width:20px; height:20px; border:1px solid #334155; border-radius:4px; display:inline-block; }
+
+/* Lasso checks */
+.lasso-checks{ display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:6px; }
+.lasso-checks label{ border:1px solid var(--line); border-radius:8px; padding:6px; background:#0a132a; }
 
 /* Responsive */
 @media (max-width:900px){
