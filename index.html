@@ -4,7 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1" />
   <title>Palette Mapper – Cup Print Helper</title>
-  <link rel="stylesheet" href="styles.css" />
+  <!-- Make sure styles.css is in the same folder as index.html -->
+  <link rel="stylesheet" href="./styles.css?v=9" id="app-css" />
 </head>
 <body>
   <header>
@@ -26,12 +27,11 @@
       <button id="pasteBtn" type="button">Paste</button>
       <button id="resetBtn" type="button" disabled>Reset</button>
     </div>
-    <div class="help">*“Upload” lets you choose from Photo Library or Camera on iOS. “Camera” forces the camera only.</div>
+    <div class="help">“Upload” lets you choose from Photo Library or Camera on iOS. “Camera” forces the camera only.</div>
     <div class="row">
       <label>Max preview width (px) <input id="maxW" type="number" min="600" value="1400" /></label>
       <label class="check"><input id="keepFullRes" type="checkbox" checked /> Process at full resolution</label>
     </div>
-
     <div class="panel">
       <div class="panel-head">Original</div>
       <canvas id="srcCanvas"></canvas>
@@ -53,7 +53,6 @@
       <button id="savePalette" class="ghost" type="button">Save current</button>
       <button id="clearSavedPalettes" class="ghost" type="button">Clear saved</button>
     </div>
-
     <details>
       <summary>Auto-extract from image (optional)</summary>
       <div class="row">
@@ -61,12 +60,11 @@
         <button id="autoExtract" type="button" disabled>Auto extract</button>
       </div>
     </details>
-
     <h3>Saved Palettes</h3>
     <div id="savedPalettes" class="saved-list"></div>
   </section>
 
-  <!-- 3) Mapping options -->
+  <!-- 3) Mapping -->
   <section class="card">
     <h2>3) Mapping options</h2>
     <div class="row">
@@ -112,7 +110,7 @@
     <canvas id="outCanvas"></canvas>
   </section>
 
-  <!-- 5) Codes & Report (PMS / HEX toggle) -->
+  <!-- 5) Codes & Report -->
   <section class="card">
     <h2>5) Codes &amp; Report</h2>
     <label>Show codes as:
@@ -121,9 +119,7 @@
         <option value="hex">HEX</option>
       </select>
     </label>
-
     <div id="codeList" class="code-list"></div>
-
     <div class="row">
       <button id="exportReport" type="button">Export report</button>
       <a id="mailtoLink" class="ghost" href="#">Email to printer</a>
@@ -140,8 +136,7 @@
       <button id="saveProject" type="button">Save</button>
       <button id="refreshProjects" class="ghost" type="button">Refresh</button>
       <button id="exportProject" class="ghost" type="button">Export</button>
-      <label class="filelike">
-        Import
+      <label class="filelike">Import
         <input id="importProject" type="file" accept="application/json" hidden />
       </label>
       <button id="deleteProject" class="ghost danger" type="button">Delete</button>
@@ -149,7 +144,7 @@
     <div id="projectsList" class="projects-list"></div>
   </aside>
 
-  <!-- Full-screen editor overlay -->
+  <!-- Full-screen editor -->
   <div id="editorOverlay" class="hidden" aria-hidden="true">
     <div class="editor-toolbar">
       <button id="toolEyedrop" class="active">Eyedrop</button>
@@ -163,7 +158,6 @@
     <aside class="editor-right">
       <h3>Palette</h3>
       <div id="editorPalette" class="editor-swatches"></div>
-
       <h3>Eyedrop</h3>
       <div class="row">
         <span id="eyeSwatch" class="sw"></span>
@@ -173,7 +167,6 @@
         <button id="eyeAdd" type="button">Add</button>
         <button id="eyeCancel" class="ghost" type="button">Cancel</button>
       </div>
-
       <h3>Lasso</h3>
       <div id="lassoChecks" class="lasso-checks"></div>
       <div class="row">
