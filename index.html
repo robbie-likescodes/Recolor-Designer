@@ -4,7 +4,6 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1" />
   <title>Palette Mapper – Cup Print Helper</title>
-  <!-- Make sure styles.css is in the same folder as index.html -->
   <link rel="stylesheet" href="./styles.css?v=10" id="app-css" />
 </head>
 <body>
@@ -23,20 +22,22 @@
     <h2>1) Load image</h2>
     <div class="row">
       <input id="fileInput" type="file" accept="image/*" />
-      <input id="cameraInput" type="file" accept="image/*" capture="environment" />
+      <label class="filelike">Camera
+        <input id="cameraInput" type="file" accept="image/*" capture="environment" hidden />
+      </label>
       <button id="pasteBtn" type="button">Paste</button>
       <button id="resetBtn" type="button" disabled>Reset</button>
     </div>
-    <div class="help">“Upload” lets you choose from Photo Library or Camera on iOS. “Camera” forces the camera only.</div>
+    <div class="help">Upload works with Photo Library & Camera on iOS. “Camera” forces camera only.</div>
     <div class="row">
       <label>Max preview width (px) <input id="maxW" type="number" min="600" value="1400" /></label>
       <label class="check"><input id="keepFullRes" type="checkbox" checked /> Process at full resolution</label>
-      <label class="check"><input id="sharpenEdges" type="checkbox" /> Edge sharpen</label>
+      <label class="check"><input id="sharpenEdges" type="checkbox" /> Sharpen text edges</label>
     </div>
     <div class="panel">
       <div class="panel-head">Original</div>
-      <canvas id="srcCanvas"></canvas>
-      <div class="tiny-help">Open full-screen editor for eyedrop + lasso. On desktop, ALT-click the preview to add a color.</div>
+      <canvas id="srcCanvas" aria-label="Original image canvas"></canvas>
+      <div class="tiny-help">Press & hold in the editor to pick a color. On desktop, ALT-click on this preview adds a color.</div>
       <div class="row">
         <button id="openEditor" type="button">Open full-screen editor</button>
       </div>
@@ -46,6 +47,8 @@
   <!-- 2) Palette -->
   <section class="card">
     <h2>2) Palette</h2>
+
+    <!-- dynamic palette rows (from app.js) -->
     <div id="paletteList" class="palette-list"></div>
 
     <div class="row">
@@ -82,7 +85,7 @@
       </label>
     </div>
     <div class="row">
-      <label class="check"><input id="useDither" type="checkbox" /> Use Floyd–Steinberg dithering</label>
+      <label class="check"><input id="useDither" type="checkbox" /> Floyd–Steinberg dither</label>
       <label>Background
         <select id="bgMode">
           <option value="keep">Keep original</option>
@@ -94,12 +97,53 @@
     <div class="row">
       <button id="applyBtn" type="button" disabled>Apply mapping</button>
       <button id="downloadBtn" type="button" disabled>Download PNG</button>
+      <label>Export scale
+        <select id="exportScale">
+          <option value="1">1×</option>
+          <option value="2">2×</option>
+          <option value="4">4×</option>
+        </select>
+      </label>
+      <button id="downloadSvgBtn" class="ghost" type="button">Download SVG</button>
     </div>
   </section>
 
-  <!-- 4) Halftone -->
+  <!-- 4) Texture Mode -->
   <section class="card">
-    <h2>4) Halftone (optional)</h2>
+    <h2>4) Texture Mode (replace one color)</h2>
+    <div class="help">Pick a palette color to replace with a two-color pattern made from colors in your palette.</div>
+    <div class="row">
+      <label>Target color
+        <select id="texTarget"></select>
+      </label>
+      <label>Pattern
+        <select id="texPattern">
+          <option value="">(none)</option>
+          <option value="checker">Checker</option>
+          <option value="stripes">Stripes</option>
+          <option value="bayer4">Bayer 4×4</option>
+          <option value="dots">Dots</option>
+        </select>
+      </label>
+      <label>Color A
+        <select id="texC1"></select>
+      </label>
+      <label>Color B
+        <select id="texC2"></select>
+      </label>
+    </div>
+    <div class="row">
+      <label>Density <input id="texDensity" type="range" min="0" max="100" value="50" /></label>
+      <label class="check"><input id="texLuma" type="checkbox" /> Density from luminance</label>
+      <button id="texAdd" type="button">Add/Update rule</button>
+      <button id="texClear" class="ghost" type="button">Clear rules</button>
+    </div>
+    <div id="texRulesList" class="tiny-help"></div>
+  </section>
+
+  <!-- 5) Halftone -->
+  <section class="card">
+    <h2>5) Halftone (optional)</h2>
     <div class="row">
       <label class="check"><input id="useHalftone" type="checkbox" /> Render as dots</label>
       <label>Dot cell size <input id="dotCell" type="number" min="3" max="64" value="6" /></label>
@@ -114,9 +158,9 @@
     <canvas id="outCanvas"></canvas>
   </section>
 
-  <!-- 5) Codes & Report -->
+  <!-- 6) Codes & Report -->
   <section class="card">
-    <h2>5) Codes &amp; Report</h2>
+    <h2>6) Codes &amp; Report</h2>
     <label>Show codes as:
       <select id="colorCodeMode">
         <option value="pms">PMS (default)</option>
@@ -162,7 +206,6 @@
     <aside class="editor-right">
       <h3>Palette</h3>
       <div id="editorPalette" class="editor-swatches"></div>
-
       <h3>Eyedrop</h3>
       <div class="row">
         <span id="eyeSwatch" class="sw"></span>
@@ -172,7 +215,6 @@
         <button id="eyeAdd" type="button">Add</button>
         <button id="eyeCancel" class="ghost" type="button">Cancel</button>
       </div>
-
       <h3>Lasso</h3>
       <div id="lassoChecks" class="lasso-checks"></div>
       <div class="row">
@@ -182,7 +224,13 @@
     </aside>
   </div>
 
-  <!-- App JS -->
+  <!-- Toasts -->
+  <div id="toastHost" aria-live="polite" aria-atomic="true"></div>
+
+  <!-- Libraries -->
+  <script src="vector.js"></script>
+  <script src="imagetracer_v1.2.6.js"></script>
+  <!-- App -->
   <script src="app.js"></script>
 </body>
 </html>
