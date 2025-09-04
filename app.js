@@ -1,12 +1,13 @@
-/* Palette Mapper — Cup Print Helper (FULL JS v10)
-   New in v10:
-   - Per-color tolerance slider (influence) and optional A/B pattern replacement
-   - Pattern options: choose two palette colors, balance %, cell size (texture)
-   - Pattern honored in both normal mapping and halftone rendering
-   - Tolerances & patterns persist in Projects and Prefs
-   - Contextual toasts: micro-tips for Eyedrop, Lasso, Halftone, Pattern, Export, etc.
-   - ALT-click eyedrop on preview (desktop) + long-press eyedrop in full-screen editor
-   - High-res pipeline + optional edge sharpen (already present)
+/* Palette Mapper — Cup Print Helper (APP.JS v10 • Part 1/2)
+   Major additions in v10:
+   - Per-color Tolerance (ΔE) + Importance (bias) sliders
+   - Texture Mode: replace one color with 2-color patterns (checker/stripes/bayer/dots)
+   - Edge-aware sharpen for small text/logo edges
+   - SVG export hooks (vector.js / Imagetracer)
+   - iPhone-friendly Eyedropper flow + toasts & first-use hints
+   - Zoom/Pan in full-screen editor (pinch & drag)
+   - Light Undo/Redo scaffolding
+   NOTE: This file is split into two parts. Scroll to "/* === PART 2 INSERTION POINT === */"
 */
 
 /////////////////////////////// DOM ///////////////////////////////
@@ -18,7 +19,7 @@ const els = {
   resetBtn: document.getElementById('resetBtn'),
   maxW: document.getElementById('maxW'),
   keepFullRes: document.getElementById('keepFullRes'),
-  sharpenEdges: document.getElementById('sharpenEdges'),
+  sharpenEdges: document.getElementById('sharpenEdges'), // optional checkbox in some themes
   srcCanvas: document.getElementById('srcCanvas'),
   outCanvas: document.getElementById('outCanvas'),
 
@@ -40,7 +41,7 @@ const els = {
   applyBtn: document.getElementById('applyBtn'),
   downloadBtn: document.getElementById('downloadBtn'),
 
-  // Halftone
+  // Halftone (existing; also reused by Texture Mode “dots”)
   useHalftone: document.getElementById('useHalftone'),
   dotCell: document.getElementById('dotCell'),
   dotBg: document.getElementById('dotBg'),
@@ -60,7 +61,7 @@ const els = {
   savePalette: document.getElementById('savePalette'),
   clearSavedPalettes: document.getElementById('clearSavedPalettes'),
 
-  // Full-screen editor overlay
+  // Full-screen editor
   openEditor: document.getElementById('openEditor'),
   editorOverlay: document.getElementById('editorOverlay'),
   toolEyedrop: document.getElementById('toolEyedrop'),
@@ -85,12 +86,60 @@ const els = {
   // Report/Email
   exportReport: document.getElementById('exportReport'),
   mailtoLink: document.getElementById('mailtoLink'),
+
+  // (New) Vector export controls — you’ll add the button in HTML in this update
+  downloadSvgBtn: document.getElementById('downloadSvg'),    // optional if present
+  exportScale: document.getElementById('exportScale')        // select: 1× / 2× / 4×
 };
 
 const sctx = els.srcCanvas.getContext('2d', { willReadFrequently: true });
 const octx = els.outCanvas.getContext('2d', { willReadFrequently: true });
 sctx.imageSmoothingEnabled = false;
 octx.imageSmoothingEnabled = false;
+
+/////////////////////////////// Toasts ///////////////////////////////
+const Toast = (()=> {
+  let host = null, showing = false, queue = [];
+  function ensureHost(){
+    if(host) return;
+    host = document.createElement('div');
+    host.id = 'toasts';
+    host.style.position = 'fixed';
+    host.style.left = '50%';
+    host.style.transform = 'translateX(-50%)';
+    host.style.bottom = '18px';
+    host.style.display = 'grid';
+    host.style.gap = '8px';
+    host.style.zIndex = '99999';
+    document.body.appendChild(host);
+  }
+  function show(msg, ms=2200){
+    ensureHost();
+    const el = document.createElement('div');
+    el.textContent = msg;
+    el.style.background = '#111826cc';
+    el.style.border = '1px solid #22314a';
+    el.style.color = '#e8ecf3';
+    el.style.padding = '10px 12px';
+    el.style.borderRadius = '10px';
+    el.style.backdropFilter = 'blur(8px)';
+    el.style.maxWidth = 'min(90vw, 520px)';
+    queue.push({el, ms});
+    pump();
+  }
+  function pump(){
+    if(showing || !queue.length) return;
+    showing = true;
+    const {el, ms} = queue.shift();
+    host.appendChild(el);
+    setTimeout(()=>{
+      el.style.transition = 'opacity .25s';
+      el.style.opacity = '0';
+      setTimeout(()=>{ try{ host.removeChild(el); }catch{} showing=false; pump(); }, 250);
+    }, ms);
+  }
+  return { show };
+})();
 
 /////////////////////////////// State ///////////////////////////////
 const state = {
@@ -99,14 +148,22 @@ const state = {
   fullH: 0,
   exifOrientation: 1,
   selectedProjectId: null,
-  codeMode: 'pms', // 'pms' | 'hex'
+  codeMode: 'pms',    // 'pms' | 'hex'
+  // Texture mode rules (post-pass)
+  textureRules: [],   // {targetIndex, pattern, c1Index, c2Index, density, luminance}
+  // Undo/Redo (lightweight)
+  undo: [], redo: [],
+  // Editor view transform
+  view: { scale: 1, tx: 0, ty: 0 }
 };
 
 const regions = []; // lasso polygons / rects
 const editor = {
   active:false, tool:'eyedrop',
   ectx:null, octx:null, lassoPts:[], lassoActive:false,
-  eyedropTimer:null, currentHex:'#000000'
+  eyedropTimer:null, currentHex:'#000000',
+  // gestures
+  dragging:false, lastX:0, lastY:0, pinchD:0, start: {scale:1, tx:0, ty:0}
 };
 
 /////////////////////////////// Constants & Utils ///////////////////////////////
@@ -120,56 +177,16 @@ const inRect = (x,y,r) => x>=r.x0 && x<=r.x1 && y>=r.y0 && y<=r.y1;
 const normalizeRect = r => ({ x0:Math.min(r.x0,r.x1), y0:Math.min(r.y0,r.y1), x1:Math.max(r.x0,r.x1), y1:Math.max(r.y0,r.y1) });
 const scaleRect = (r,sx,sy)=>({ x0:Math.floor(r.x0*sx), y0:Math.floor(r.y0*sy), x1:Math.floor(r.x1*sx), y1:Math.floor(r.y1*sy) });
 const getOrientedDims = (o, w, h) => ([5,6,7,8].includes(o) ? {w:h, h:w} : {w, h});
-const randHash01 = (x,y)=>{ // stable 0..1 hash per integer grid coord
-  let n = (x*73856093) ^ (y*19349663);
-  n = (n<<13) ^ n; n = (n*(n*n*15731 + 789221) + 1376312589) & 0x7fffffff;
-  return (n / 0x7fffffff);
-};
+const debounce = (fn, ms=200)=>{ let t; return (...a)=>{ clearTimeout(t); t=setTimeout(()=>fn(...a), ms); }; };
 
-/////////////////////////////// Toasts (lightweight) ///////////////////////////////
-const TOAST_LS_KEY = 'pm_tips_v2';
-const tipSeen = (k)=>{ try{ const o=JSON.parse(localStorage.getItem(TOAST_LS_KEY)||'{}'); return !!o[k]; }catch{ return false; } };
-const markTip = (k)=>{ try{ const o=JSON.parse(localStorage.getItem(TOAST_LS_KEY)||'{}'); o[k]=true; localStorage.setItem(TOAST_LS_KEY,JSON.stringify(o)); }catch{} };
-let toastHost=null, toastQueue=[];
-function ensureToastHost(){
-  if(toastHost) return;
-  toastHost=document.createElement('div');
-  toastHost.id='pm_toasts';
-  toastHost.setAttribute('aria-live','polite');
-  toastHost.style.cssText='position:fixed;left:50%;transform:translateX(-50%);bottom:calc(16px + env(safe-area-inset-bottom));display:grid;gap:8px;z-index:99999';
-  const style=document.createElement('style');
-  style.textContent=`
-  .pm-toast{background:#0b1225e6;border:1px solid #1e293b;color:#e5e7eb;padding:10px 12px;border-radius:10px;backdrop-filter:blur(10px);max-width:92vw;box-shadow:0 8px 24px rgba(0,0,0,.35)}
-  .pm-toast.pm-tip{border-color:#1f3a5f}
-  .pm-toast.pm-success{border-color:#14532d}
-  .pm-toast.pm-warn{border-color:#7c2d12}
-  .pm-toast .pm-x{margin-left:10px;background:transparent;border:0;color:#dbeafe;font-weight:700;cursor:pointer}
-  @media(prefers-reduced-motion:no-preference){
-    .pm-toast{animation:pmfade .25s ease both}
-    @keyframes pmfade{from{transform:translate(-50%,8px);opacity:.001}to{transform:translate(-50%,0);opacity:1}}
-  }`;
-  document.head.appendChild(style);
-  document.body.appendChild(toastHost);
-}
-function toast(msg, type='tip', ms=3600){
-  ensureToastHost();
-  const div=document.createElement('div');
-  div.className=`pm-toast pm-${type}`;
-  div.innerHTML=`<span>${msg}</span> <button class="pm-x" aria-label="Dismiss">×</button>`;
-  const close=()=>{ if(!div) return; div.style.opacity='0'; div.style.transition='opacity .2s'; setTimeout(()=>div.remove(),220); };
-  div.querySelector('.pm-x').onclick=close;
-  toastHost.appendChild(div);
-  const t=setTimeout(close, ms);
-  div.addEventListener('pointerdown', close, {passive:true});
-  toastQueue.push({div,t});
-}
-
-/////////////////////////////// Storage (Saved Palettes + Projects) ///////////////////////////////
-const LS_KEYS = { PALETTES:'pm_saved_palettes_v1', PREFS:'pm_prefs_v2' }; // v2 to include paletteMeta
+/////////////////////////////// Storage ///////////////////////////////
+const LS_KEYS = { PALETTES:'pm_saved_palettes_v2', PREFS:'pm_prefs_v2', HINTS:'pm_hints_v1' };
 const loadSavedPalettes = () => { try { return JSON.parse(localStorage.getItem(LS_KEYS.PALETTES)||'[]'); } catch { return []; } };
 const saveSavedPalettes = arr => localStorage.setItem(LS_KEYS.PALETTES, JSON.stringify(arr));
 const loadPrefs = () => { try { return JSON.parse(localStorage.getItem(LS_KEYS.PREFS)||'{}'); } catch { return {}; } };
 const savePrefs = obj => localStorage.setItem(LS_KEYS.PREFS, JSON.stringify(obj));
+const loadHints = () => { try { return JSON.parse(localStorage.getItem(LS_KEYS.HINTS)||'{}'); } catch { return {}; } };
+const saveHints = obj => localStorage.setItem(LS_KEYS.HINTS, JSON.stringify(obj));
 
 const DB_NAME='palette_mapper_db', DB_STORE='projects';
 function openDB(){ return new Promise((res,rej)=>{ const r=indexedDB.open(DB_NAME,1); r.onupgradeneeded=()=>{const db=r.result; if(!db.objectStoreNames.contains(DB_STORE)) db.createObjectStore(DB_STORE,{keyPath:'id',autoIncrement:true});}; r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); });}
@@ -185,15 +202,18 @@ function isHeicFile(file) {
   return name.endsWith('.heic') || name.endsWith('.heif') || type.includes('heic') || type.includes('heif');
 }
 function heicNotSupportedMessage() {
-  alert(`This photo appears to be HEIC/HEIF, which this browser can't decode into canvas.
+  alert(
+`This photo appears to be HEIC/HEIF, which this browser can't decode into canvas.
 
-Use a JPG/PNG, or on iPhone set: Settings → Camera → Formats → “Most Compatible”.`);
+Use a JPG/PNG, or on iPhone set: Settings → Camera → Formats → “Most Compatible”.`
+  );
 }
 function isLikelyJpeg(file){
   const t=(file.type||'').toLowerCase();
   const ext=(file.name||'').split('.').pop().toLowerCase();
   return t.includes('jpeg') || t.includes('jpg') || ext==='jpg' || ext==='jpeg';
 }
+// Minimal EXIF orientation parse (same as before)
 async function readJpegOrientation(file){
   return new Promise((resolve) => {
     const reader = new FileReader();
@@ -206,7 +226,7 @@ async function readJpegOrientation(file){
           const marker = view.getUint16(offset, false); offset += 2;
           if (marker === 0xFFE1) {
             const exifLength = view.getUint16(offset, false); offset += 2;
-            if (view.getUint32(offset, false) !== 0x45786966) break;
+            if (view.getUint32(offset, false) !== 0x45786966) break; // "Exif"
             offset += 6;
             const tiffOffset = offset;
             const little = view.getUint16(tiffOffset, false) === 0x4949;
@@ -248,130 +268,122 @@ function drawImageWithOrientation(ctx, img, targetW, targetH, orientation){
   ctx.restore();
 }
 
-/////////////////////////////// Palette UI ///////////////////////////////
-function addPaletteRow(hex='#FFFFFF', meta=null){
-  // meta: { tol: number(50..200 default 100), pattern:{enabled,aIdx,bIdx,balance(0..100),cell} }
+/////////////////////////////// Color math (sRGB → Lab) ///////////////////////////////
+function srgbToLinear(u){ u/=255; return (u<=0.04045)? u/12.92 : Math.pow((u+0.055)/1.055,2.4); }
+function rgbToXyz(r,g,b){ r=srgbToLinear(r); g=srgbToLinear(g); b=srgbToLinear(b);
+  const x=r*0.4124564 + g*0.3575761 + b*0.1804375;
+  const y=r*0.2126729 + g*0.7151522 + b*0.0721750;
+  const z=r*0.0193339 + g*0.1191920 + b*0.9503041; return [x,y,z]; }
+function xyzToLab(x,y,z){ const Xn=0.95047,Yn=1.0,Zn=1.08883; x/=Xn; y/=Yn; z/=Zn;
+  const f=t=>(t>0.008856)?Math.cbrt(t):(7.787*t+16/116); const fx=f(x),fy=f(y),fz=f(z);
+  return [116*fy-16, 500*(fx-fy), 200*(fy-fz)];
+}
+function rgbToLab(r,g,b){ const [x,y,z]=rgbToXyz(r,g,b); return xyzToLab(x,y,z); }
+function deltaE2(l1,l2){ const dL=l1[0]-l2[0], da=l1[1]-l2[1], db=l1[2]-l2[2]; return dL*dL + da*da + db*db; }
+function deltaE2Weighted(l1,l2,wL=1,wC=1){
+  const dL=l1[0]-l2[0], da=l1[1]-l2[1], db=l1[2]-l2[2];
+  return wL*dL*dL + wC*(da*da+db*db);
+}
+function buildPaletteLab(pal){ return pal.map(([r,g,b])=>({ rgb:[r,g,b], lab:rgbToLab(r,g,b) })); }
+
+/////////////////////////////// PMS / HEX & report (unchanged logic) ///////////////////////////////
+let PMS_LIB = [];
+const PMS_CACHE = new Map(); // hex -> {name, hex, deltaE}
+async function loadPmsJson(url='pms_solid_coated.json'){
+  try { PMS_LIB = await (await fetch(url, {cache:'no-store'})).json(); }
+  catch (e) { console.warn('PMS library not loaded', e); PMS_LIB = []; }
+}
+function nearestPms(hex){
+  if (PMS_CACHE.has(hex)) return PMS_CACHE.get(hex);
+  if (!PMS_LIB.length) { const out={name:'—',hex,deltaE:0}; PMS_CACHE.set(hex,out); return out; }
+  const rgb = hexToRgb(hex); const lab = rgbToLab(rgb.r, rgb.g, rgb.b);
+  let best=null, bestD=Infinity;
+  for (const sw of PMS_LIB){
+    const r2 = hexToRgb(sw.hex); if(!r2) continue;
+    const lab2 = rgbToLab(r2.r, r2.g, r2.b);
+    const d = deltaE2Weighted(lab, lab2, 1, 1);
+    if (d < bestD){ bestD = d; best = { name: sw.name, hex: sw.hex, deltaE: Math.sqrt(d) }; }
+  }
+  const out = best || { name:'—', hex, deltaE:0 };
+  PMS_CACHE.set(hex, out);
+  return out;
+}
+
+/////////////////////////////// Palette UI (with per-color tolerance & importance) ///////////////////////////////
+/** Palette row DOM:
+ *  Color | HEX | Tolerance ΔE | Importance | Remove
+ *  - tolerance (ΔE) 2..40 (default 12)
+ *  - importance (bias) 0..200% (default 100)
+ */
+function addPaletteRow(hex='#FFFFFF', tol=12, weight=100){
   const row=document.createElement('div'); row.className='palette-item';
   row.innerHTML=`
-    <div class="palette-main">
-      <input type="color" aria-label="color picker" value="${hex}">
-      <input type="text" aria-label="hex code" value="${hex}" placeholder="#RRGGBB">
-      <span class="tol"><span>Tol</span>
-        <input class="tolRange" type="range" min="50" max="200" value="${meta?.tol ?? 100}">
-        <span class="tolv mono">${fmtMult(meta?.tol ?? 100)}</span>
-      </span>
-      <button class="ghost remove" type="button">Remove</button>
-    </div>
-    <details class="pattern">
-      <summary>Replace with pattern (optional)</summary>
-      <div class="patrow">
-        <label>A <select class="patA"></select></label>
-        <label>B <select class="patB"></select></label>
-        <label>Balance <input class="patBal" type="range" min="0" max="100" value="${meta?.pattern?.balance ?? 50}"> <span class="patBalv mono">${(meta?.pattern?.balance ?? 50)}%</span></label>
-        <label>Cell <input class="patCell" type="number" min="3" max="64" value="${meta?.pattern?.cell ?? 6}"></label>
-        <label class="check"><input class="patEnable" type="checkbox" ${meta?.pattern?.enabled?'checked':''}> Enable</label>
-      </div>
-    </details>
+    <input class="pi-color" type="color" value="${hex}" aria-label="color picker">
+    <input class="pi-hex"   type="text"  value="${hex}" aria-label="hex code" placeholder="#RRGGBB">
+    <label class="pi-tol-wrap">Tol ΔE
+      <input class="pi-tol" type="range" min="2" max="40" value="${tol}">
+      <span class="pi-tol-out mono">${tol}</span>
+    </label>
+    <label class="pi-w-wrap">Importance
+      <input class="pi-w" type="range" min="0" max="200" value="${weight}">
+      <span class="pi-w-out mono">${weight}%</span>
+    </label>
+    <button class="ghost remove" type="button">Remove</button>
   `;
-  const colorInput=row.querySelector('input[type=color]');
-  const hexInput=row.querySelector('input[type=text]');
+  const colorInput=row.querySelector('.pi-color');
+  const hexInput=row.querySelector('.pi-hex');
+  const tolInput=row.querySelector('.pi-tol');
+  const tolOut=row.querySelector('.pi-tol-out');
+  const wInput=row.querySelector('.pi-w');
+  const wOut=row.querySelector('.pi-w-out');
   const delBtn=row.querySelector('.remove');
-  const tolRange=row.querySelector('.tolRange');
-  const tolOut=row.querySelector('.tolv');
-  const pat= {
-    details: row.querySelector('details.pattern'),
-    enable: row.querySelector('.patEnable'),
-    A: row.querySelector('.patA'),
-    B: row.querySelector('.patB'),
-    bal: row.querySelector('.patBal'),
-    balv: row.querySelector('.patBalv'),
-    cell: row.querySelector('.patCell')
-  };
 
-  const syncColor=(fromColor)=>{
-    if(fromColor) hexInput.value = colorInput.value.toUpperCase();
+  function syncFromColor(){
+    hexInput.value = colorInput.value.toUpperCase();
+    tolOut.textContent = tolInput.value;
+    wOut.textContent = wInput.value + '%';
+    persistPrefs(); renderCodeList(); updateMailto(); requestPreviewUpdate();
+  }
+  function syncFromHex(){
     let v=hexInput.value.trim(); if(!v.startsWith('#')) v='#'+v;
-    if(/^#([0-9A-Fa-f]{6})$/.test(v)){ colorInput.value=v; hexInput.value=v.toUpperCase(); }
-    renderCodeList(); updateMailto(); persistPrefs(); refreshPatternSelects();
-  };
-  colorInput.addEventListener('input',()=>syncColor(true));
-  hexInput.addEventListener('change',()=>syncColor(false));
-  delBtn.addEventListener('click',()=>{ row.remove(); renderCodeList(); updateMailto(); persistPrefs(); refreshPatternSelects(); });
+    if(/^#([0-9A-Fa-f]{6})$/.test(v)){ colorInput.value=v; hexInput.value=v.toUpperCase(); persistPrefs(); renderCodeList(); updateMailto(); requestPreviewUpdate(); }
+  }
 
-  tolRange.addEventListener('input',()=>{ tolOut.textContent = fmtMult(tolRange.value); });
-  tolRange.addEventListener('change',()=>{ persistPrefs(); });
-
-  pat.bal.addEventListener('input',()=>{ pat.balv.textContent = `${pat.bal.value}%`; });
-  [pat.enable,pat.bal,pat.cell,pat.A,pat.B].forEach(el=> el.addEventListener('change',()=>persistPrefs()));
-
-  // one-time pattern hint toast
-  pat.details?.addEventListener('toggle', ()=>{
-    if(pat.details.open && !tipSeen('pattern_hint')){
-      toast('Replace this color with an A/B pattern. Balance sets coverage; Cell sets texture.', 'tip');
-      markTip('pattern_hint');
-    }
-  });
+  colorInput.addEventListener('input', syncFromColor);
+  hexInput.addEventListener('change', syncFromHex);
+  tolInput.addEventListener('input', ()=>{ tolOut.textContent=tolInput.value; requestPreviewUpdate(); persistPrefs(); });
+  wInput.addEventListener('input', ()=>{ wOut.textContent=wInput.value+'%'; requestPreviewUpdate(); persistPrefs(); });
+  delBtn.addEventListener('click',()=>{ row.remove(); renderCodeList(); updateMailto(); persistPrefs(); requestPreviewUpdate(); });
 
   els.paletteList.appendChild(row);
-  refreshPatternSelects();
 }
 function getPalette(){
   const rows=[...els.paletteList.querySelectorAll('.palette-item')];
-  const out=[]; for(const r of rows){ const hex=r.querySelector('input[type=text]').value.trim(); const rgb=hexToRgb(hex); if(rgb) out.push([rgb.r,rgb.g,rgb.b]); }
+  const out=[]; for(const r of rows){
+    const hex=(r.querySelector('.pi-hex')?.value||'').trim();
+    const rgb=hexToRgb(hex);
+    const tol = parseInt(r.querySelector('.pi-tol')?.value||'12',10);
+    const w   = parseInt(r.querySelector('.pi-w')?.value||'100',10);
+    if(rgb) out.push([rgb.r,rgb.g,rgb.b, tol, w]);
+  }
   return out;
 }
-// NEW: return palette with per-color meta
-function getPaletteWithMeta(){
-  const rows=[...els.paletteList.querySelectorAll('.palette-item')];
-  const out=[];
-  rows.forEach((r,idx)=>{
-    const hexEl=r.querySelector('input[type=text]');
-    const rgb=hexToRgb(hexEl.value.trim()); if(!rgb) return;
-    const tol=clamp(parseInt(r.querySelector('.tolRange').value,10)||100,50,200);
-    const A = (r.querySelector('.patA').selectedIndex)|0;
-    const B = (r.querySelector('.patB').selectedIndex)|0;
-    const balance = clamp(parseInt(r.querySelector('.patBal').value,10)||50,0,100);
-    const cell = clamp(parseInt(r.querySelector('.patCell').value,10)||6,3,64);
-    const enabled = !!r.querySelector('.patEnable').checked;
-    out.push({
-      rgb:[rgb.r,rgb.g,rgb.b],
-      tol,
-      pattern:{ enabled, aIdx:A, bIdx:B, balance, cell }
-    });
-  });
-  return out;
-}
-function setPalette(hexes, metas=null){
+function setPalette(hexesOrObjects){
   els.paletteList.innerHTML='';
-  hexes.forEach((h,i)=>addPaletteRow(h, metas?.[i]||null));
-  refreshPatternSelects();
-}
-function refreshPatternSelects(){
-  const rows=[...els.paletteList.querySelectorAll('.palette-item')];
-  const hexes=rows.map(r=>r.querySelector('input[type=text]').value.trim().toUpperCase());
-  rows.forEach((r,ri)=>{
-    const A=r.querySelector('.patA'), B=r.querySelector('.patB');
-    const selA=A.selectedIndex; const selB=B.selectedIndex;
-    [A,B].forEach(sel=>{
-      const v=sel.value; sel.innerHTML=''; hexes.forEach((h,idx)=>{
-        const opt=document.createElement('option'); opt.value=String(idx); opt.textContent=`${idx+1}: ${h}`; sel.appendChild(opt);
-      });
-      // default to next/next+1 (not self)
-      if(sel === A){
-        let def = (ri+1) % hexes.length; sel.selectedIndex = (selA>=0?selA:def);
-      }else{
-        let def = (ri+2) % hexes.length; sel.selectedIndex = (selB>=0?selB:def);
-      }
-    });
-  });
+  for(const item of hexesOrObjects){
+    if(typeof item === 'string'){ addPaletteRow(item, 12, 100); }
+    else if(Array.isArray(item)){ // [hex, tol, weight]
+      addPaletteRow(item[0], item[1]??12, item[2]??100);
+    }else if(item && item.hex){ addPaletteRow(item.hex, item.tol??12, item.weight??100); }
+  }
 }
 function renderSavedPalettes(){
   if(!els.savedPalettes) return;
   const list=loadSavedPalettes(); els.savedPalettes.innerHTML='';
   list.forEach((p,idx)=>{ const div=document.createElement('div'); div.className='item';
     const sw=p.colors.map(h=>`<span class="sw" title="${h}" style="display:inline-block;width:16px;height:16px;border-radius:4px;border:1px solid #334155;background:${h}"></span>`).join('');
-    div.innerHTML=`<div><strong>${p.name||('Palette '+(idx+1))}</strong><br><small>${p.colors.join(', ')}</small></div><div>${sw}</div>`;
-    div.addEventListener('click',()=>{ setPalette(p.colors); renderCodeList(); updateMailto(); persistPrefs(); });
+    div.innerHTML=`<div><strong>${p.name||('Palette '+(idx+1))}</strong><br><small>${(p.colors||[]).join(', ')}</small></div><div>${sw}</div>`;
+    div.addEventListener('click',()=>{ setPalette((p.colors||[]).map(h=>[h,12,100])); renderCodeList(); updateMailto(); persistPrefs(); requestPreviewUpdate(); });
     els.savedPalettes.appendChild(div);
   });
 }
@@ -386,19 +398,21 @@ function drawPreviewFromState(){
   els.srcCanvas.width = w; els.srcCanvas.height = h;
   sctx.clearRect(0,0,w,h); sctx.imageSmoothingEnabled=false;
 
-  if (orient === 1 && bmp instanceof ImageBitmap) sctx.drawImage(bmp,0,0,w,h);
-  else drawImageWithOrientation(sctx, bmp, w, h, orient);
+  if (orient === 1 && bmp instanceof ImageBitmap) {
+    sctx.drawImage(bmp,0,0,w,h);
+  } else {
+    drawImageWithOrientation(sctx, bmp, w, h, orient);
+  }
 
   els.outCanvas.width = w; els.outCanvas.height = h;
   octx.clearRect(0,0,w,h); octx.imageSmoothingEnabled=false;
   els.downloadBtn.disabled = true;
 
-  // Auto 10-color palette (hybrid)
   setTimeout(() => { try { autoPaletteFromCanvasHybrid(els.srcCanvas, 10); renderCodeList(); updateMailto(); } catch(e){ console.warn('autoPalette failed', e); } }, 0);
 }
 function toggleImageActions(enable){
   els.applyBtn.disabled=!enable;
-  els.autoExtract && (els.autoExtract.disabled=!enable);
+  if(els.autoExtract) els.autoExtract.disabled=!enable;
   els.resetBtn.disabled=!enable;
 }
 
@@ -423,7 +437,9 @@ async function handleFile(file, source='file'){
       try{
         const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
         state.fullBitmap = bmp; state.fullW = bmp.width; state.fullH = bmp.height; state.exifOrientation = 1;
-        drawPreviewFromState(); toggleImageActions(true); return;
+        drawPreviewFromState(); toggleImageActions(true);
+        Toast.show('Image loaded • Open the editor to pick colors (Long-press to sample).');
+        return;
       }catch(e){ console.warn('createImageBitmap failed:', e); }
     }
 
@@ -432,9 +448,14 @@ async function handleFile(file, source='file'){
       const img = await loadImage(url);
       state.fullBitmap = img;
       state.fullW = img.naturalWidth || img.width; state.fullH = img.naturalHeight || img.height;
-      if (isLikelyJpeg(file)) { try { state.exifOrientation = await readJpegOrientation(file); } catch {} } else { state.exifOrientation = 1; }
+      if (isLikelyJpeg(file)) {
+        try { state.exifOrientation = await readJpegOrientation(file); } catch {}
+      } else { state.exifOrientation = 1; }
       drawPreviewFromState(); toggleImageActions(true);
-    } finally { revokeUrl(url); }
+      Toast.show('Image loaded • Open the editor to pick colors (Long-press to sample).');
+    } finally {
+      revokeUrl(url);
+    }
   } catch(err){
     console.error('Image load error:', err);
     alert('Could not open that image. Try a JPG/PNG or a different photo.');
@@ -444,175 +465,7 @@ async function handleFile(file, source='file'){
   }
 }
 
-/////////////////////////////// Color math (sRGB → Lab) ///////////////////////////////
-function srgbToLinear(u){ u/=255; return (u<=0.04045)? u/12.92 : Math.pow((u+0.055)/1.055,2.4); }
-function rgbToXyz(r,g,b){ r=srgbToLinear(r); g=srgbToLinear(g); b=srgbToLinear(b);
-  const x=r*0.4124564 + g*0.3575761 + b*0.1804375;
-  const y=r*0.2126729 + g*0.7151522 + b*0.0721750;
-  const z=r*0.0193339 + g*0.1191920 + b*0.9503041; return [x,y,z]; }
-function xyzToLab(x,y,z){ const Xn=0.95047,Yn=1.0,Zn=1.08883; x/=Xn; y/=Yn; z/=Zn;
-  const f=t=>(t>0.008856)?Math.cbrt(t):(7.787*t+16/116); const fx=f(x),fy=f(y),fz=f(z);
-  return [116*fy-16, 500*(fx-fy), 200*(fy-fz)];
-}
-function rgbToLab(r,g,b){ const [x,y,z]=rgbToXyz(r,g,b); return xyzToLab(x,y,z); }
-function deltaE2Weighted(l1,l2,wL,wC){ const dL=l1[0]-l2[0], da=l1[1]-l2[1], db=l1[2]-l2[2]; return wL*dL*dL + wC*(da*da+db*db); }
-function buildPaletteLab(pal){ return pal.map(([r,g,b])=>({ rgb:[r,g,b], lab:rgbToLab(r,g,b) })); }
-
-/////////////////////////////// Mapping (palette / halftone) ///////////////////////////////
-// Pattern decision helper: choose A vs B for a pixel with coverage probability p (0..1)
-function patternPickAB(x,y,cell,p){
-  const gx = Math.floor(x/Math.max(1,cell)), gy = Math.floor(y/Math.max(1,cell));
-  const t = randHash01(gx,gy);
-  return t < p ? 'A' : 'B';
-}
-
-function mapToPalette(imgData, paletteMeta, wL=1.0, wC=1.0, dither=false, bgMode='keep', effRegions=[]){
-  // paletteMeta: [{rgb:[r,g,b], tol:50..200, pattern:{enabled,aIdx,bIdx,balance,cell}}]
-  const palette = paletteMeta.map(p=>p.rgb);
-  const palLab=buildPaletteLab(palette);
-  const tolFactors = paletteMeta.map(p=> 100 / clamp(p.tol||100,50,200)); // >1 means stricter, <1 means looser
-  const w=imgData.width, h=imgData.height, src=imgData.data;
-  const out=new ImageData(w,h); out.data.set(src);
-
-  if(bgMode!=='keep'){
-    for(let i=0;i<src.length;i+=4){
-      if(bgMode==='white'){ out.data[i+3]=255; }
-      else if(bgMode==='transparent'){ if(src[i+3]<128) out.data[i+3]=0; }
-    }
-  }
-
-  const errR=dither?new Float32Array(w*h):null;
-  const errG=dither?new Float32Array(w*h):null;
-  const errB=dither?new Float32Array(w*h):null;
-
-  for(let y=0;y<h;y++){
-    for(let x=0;x<w;x++){
-      const idx=y*w+x, i4=idx*4; if(out.data[i4+3]===0) continue;
-      let r=out.data[i4], g=out.data[i4+1], b=out.data[i4+2];
-      if(dither){ r=clamp(Math.round(r+errR[idx]),0,255); g=clamp(Math.round(g+errG[idx]),0,255); b=clamp(Math.round(b+errB[idx]),0,255); }
-
-      // region gating
-      let allowedSet=null;
-      if(effRegions && effRegions.length){
-        for(let ri=effRegions.length-1; ri>=0; ri--){
-          const R=effRegions[ri];
-          if(R.type==='polygon'){ if(R.mask[idx]){ allowedSet=R.allowed; break; } }
-          else if(inRect(x,y,R)){ allowedSet=R.allowed; break; }
-        }
-      }
-
-      const lab=rgbToLab(r,g,b);
-      let best=0, bestD=Infinity;
-      for(let p=0;p<palLab.length;p++){
-        if(allowedSet && !allowedSet.has(p)) continue;
-        const d2=deltaE2Weighted(lab,palLab[p].lab,wL,wC) * tolFactors[p]*tolFactors[p];
-        if(d2<bestD){ bestD=d2; best=p; }
-      }
-
-      // If best color has a pattern, choose A or B instead
-      const meta = paletteMeta[best]?.pattern || {};
-      let outRGB = palLab[best].rgb;
-      if(meta.enabled && paletteMeta[meta.aIdx] && paletteMeta[meta.bIdx]){
-        const pCov = clamp((meta.balance||50)/100, 0, 1);
-        const pick = patternPickAB(x,y, meta.cell||6, pCov);
-        const pickIdx = (pick==='A'? meta.aIdx : meta.bIdx);
-        outRGB = palLab[pickIdx].rgb;
-      }
-
-      const [nr,ng,nb]=outRGB;
-      out.data[i4]=nr; out.data[i4+1]=ng; out.data[i4+2]=nb;
-
-      if(dither){
-        const er=r-nr, eg=g-ng, eb=b-nb;
-        const push=(xx,yy,fr,fg,fb)=>{ if(xx<0||xx>=w||yy<0||yy>=h) return; const j=yy*w+xx; errR[j]+=fr; errG[j]+=fg; errB[j]+=fb; };
-        push(x+1,y,     er*7/16, eg*7/16, eb*7/16);
-        push(x-1,y+1,   er*3/16, eg*3/16, eb*3/16);
-        push(x,  y+1,   er*5/16, eg*5/16, eb*5/16);
-        push(x+1,y+1,   er*1/16, eg*1/16, eb*1/16);
-      }
-    }
-  }
-  return out;
-}
-
-// Halftone helpers (unchanged + small fixes)
-function avgColorInCell(data, w, h, x0, y0, sz) {
-  let r=0,g=0,b=0,a=0,count=0;
-  const x1=Math.min(w, x0+sz), y1=Math.min(h, y0+sz);
-  for (let y=y0; y<y1; y++) {
-    let i=(y*w + x0)*4;
-    for (let x=x0; x<x1; x++, i+=4) {
-      const A=data[i+3]; if (A===0) continue;
-      r+=data[i]; g+=data[i+1]; b+=data[i+2]; a+=A; count++;
-    }
-  }
-  if (count===0) return {r:255,g:255,b:255,a:0};
-  return { r:Math.round(r/count), g:Math.round(g/count), b:Math.round(b/count), a:Math.round(a/count) };
-}
-function coverageBetweenColors(cellRGB, fgLab, bgLab, wL, wC) {
-  const lab = rgbToLab(cellRGB.r, cellRGB.g, cellRGB.b);
-  const dFg = Math.sqrt(deltaE2Weighted(lab, fgLab, wL, wC));
-  const dBg = Math.sqrt(deltaE2Weighted(lab, bgLab, wL, wC));
-  const eps = 1e-6, wFg = 1/Math.max(eps,dFg), wBg = 1/Math.max(eps,dBg);
-  return wFg / (wFg + wBg);
-}
-function allowedAt(x, y, w, effRegions){
-  let allowed=null; if (effRegions && effRegions.length){
-    const idx=y*w+x;
-    for (let ri=effRegions.length-1; ri>=0; ri--){
-      const R=effRegions[ri];
-      if (R.type==='polygon'){ if (R.mask[idx]){ allowed=R.allowed; break; } }
-      else if (inRect(x,y,R)){ allowed=R.allowed; break; }
-    }
-  } return allowed;
-}
-function renderHalftone(ctx, imgData, paletteMeta, bgHex, cellSize=6, jitter=false, wL=1.0, wC=1.0, effRegions=[]){
-  const palette = paletteMeta.map(p=>p.rgb);
-  const palLab=buildPaletteLab(palette);
-  const tolFactors = paletteMeta.map(p=> 100 / clamp(p.tol||100,50,200));
-  const w=imgData.width, h=imgData.height, data=imgData.data;
-  const bg=hexToRgb(bgHex)||{r:255,g:255,b:255}; const bgLab=rgbToLab(bg.r,bg.g,b.b);
-
-  ctx.save(); ctx.fillStyle = rgbToHex(bg.r,bg.g,bg.b); ctx.fillRect(0,0,w,h);
-
-  for(let y=0;y<h;y+=cellSize){
-    for(let x=0;x<w;x+=cellSize){
-      const cell=avgColorInCell(data,w,h,x,y,cellSize); if(cell.a===0) continue;
-      const cxPix = clamp(Math.floor(x+cellSize*0.5),0,w-1);
-      const cyPix = clamp(Math.floor(y+cellSize*0.5),0,h-1);
-      const allowed = allowedAt(cxPix, cyPix, w, effRegions);
-
-      const lab=rgbToLab(cell.r,cell.g,cell.b);
-      let best=0, bestD=Infinity, found=false;
-      for(let p=0;p<palLab.length;p++){
-        if(allowed && !allowed.has(p)) continue;
-        const d2=deltaE2Weighted(lab,palLab[p].lab,wL,wC) * tolFactors[p]*tolFactors[p];
-        if(d2<bestD){ bestD=d2; best=p; found=true; }
-      }
-      if(!found && palLab.length) best=0;
-
-      // Pattern support: swap dot color to A/B when enabled for chosen entry
-      let fgIndex = best;
-      const meta = paletteMeta[best]?.pattern || {};
-      if(meta.enabled && paletteMeta[meta.aIdx] && paletteMeta[meta.bIdx]){
-        const pCov = clamp((meta.balance||50)/100, 0, 1);
-        const pick = patternPickAB(cxPix,cyPix, meta.cell||cellSize, pCov);
-        fgIndex = (pick==='A'? meta.aIdx : meta.bIdx);
-      }
-
-      const fg=palLab[fgIndex];
-      const cov=coverageBetweenColors(cell, fg.lab, bgLab, wL, wC);
-      const maxR=(cellSize*0.5), radius=Math.max(0.4, Math.sqrt(cov)*maxR);
-      let cx=x+cellSize*0.5, cy=y+cellSize*0.5;
-      if(jitter){ const j=cellSize*0.15; cx+=(Math.random()*2-1)*j; cy+=(Math.random()*2-1)*j; }
-      ctx.fillStyle=rgbToHex(fg.rgb[0],fg.rgb[1],fg.rgb[2]);
-      ctx.beginPath(); ctx.arc(cx,cy,radius,0,Math.PI*2); ctx.fill();
-    }
-  }
-  ctx.restore();
-}
-
-/////////////////////////////// K-means + Hybrid Auto Palette ///////////////////////////////
+/////////////////////////////// Hybrid Auto-Palette (same approach) ///////////////////////////////
 function kmeans(data,k=5,iters=10){
   const n=data.length/4;
   const centers=[]; for(let c=0;c<k;c++){ const idx=Math.floor((c+0.5)*n/k); centers.push([data[idx*4],data[idx*4+1],data[idx*4+2]]); }
@@ -649,23 +502,6 @@ function kmeansFromSeeds(data, k, seeds, iters=8){
   }
   return centers;
 }
-function sampleImageDataForClustering(ctx, w, h, targetPixels = 120000) {
-  const step = Math.max(1, Math.floor(Math.sqrt((w * h) / targetPixels)));
-  const outW = Math.floor(w / step), outH = Math.floor(h / step);
-  const sampled = new Uint8ClampedArray(outW * outH * 4);
-  let si = 0;
-  for (let y = 0; y < h; y += step) {
-    const row = ctx.getImageData(0, y, w, 1).data;
-    for (let x = 0; x < w; x += step) {
-      const i = x * 4;
-      sampled[si++] = row[i];
-      sampled[si++] = row[i + 1];
-      sampled[si++] = row[i + 2];
-      sampled[si++] = row[i + 3];
-    }
-  }
-  return sampled;
-}
 function autoPaletteFromCanvasHybrid(canvas, k = 10) {
   if (!canvas || !canvas.width) return;
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
@@ -692,32 +528,13 @@ function autoPaletteFromCanvasHybrid(canvas, k = 10) {
 
   const centers = kmeansFromSeeds(img, k, ranked, 8);
   const hexes = centers.map(([r,g,b])=>rgbToHex(r,g,b));
-  setPalette(hexes);
+  // default tolerances/weights
+  setPalette(hexes.map(h=>[h,12,100]));
 }
 
-/////////////////////////////// PMS / HEX display & reporting ///////////////////////////////
-let PMS_LIB = [];
-const PMS_CACHE = new Map(); // hex -> {name, hex, deltaE}
-async function loadPmsJson(url='pms_solid_coated.json'){
-  try { PMS_LIB = await (await fetch(url, {cache:'no-store'})).json(); }
-  catch (e) { console.warn('PMS library not loaded', e); PMS_LIB = []; }
-}
-function nearestPms(hex){
-  if (PMS_CACHE.has(hex)) return PMS_CACHE.get(hex);
-  if (!PMS_LIB.length) { const out={name:'—',hex,deltaE:0}; PMS_CACHE.set(hex,out); return out; }
-  const rgb = hexToRgb(hex); const lab = rgbToLab(rgb.r, rgb.g, rgb.b);
-  let best=null, bestD=Infinity;
-  for (const sw of PMS_LIB){
-    const r2 = hexToRgb(sw.hex); if(!r2) continue;
-    const lab2 = rgbToLab(r2.r, r2.g, r2.b);
-    const d = deltaE2Weighted(lab, lab2, 1, 1);
-    if (d < bestD){ bestD = d; best = { name: sw.name, hex: sw.hex, deltaE: Math.sqrt(d) }; }
-  }
-  const out = best || { name:'—', hex, deltaE:0 };
-  PMS_CACHE.set(hex, out);
-  return out;
-}
+/////////////////////////////// Codes UI + Report + Email ///////////////////////////////
 function currentPaletteCodes(){
+  // returns [{hex, label, swatchHex}]
   return getPalette().map(([r,g,b])=>{
     const hex = rgbToHex(r,g,b);
     if (state.codeMode === CODE_MODES.HEX) {
@@ -774,7 +591,7 @@ Thanks!`
   if (els.mailtoLink) els.mailtoLink.href = `mailto:${to}?subject=${subject}&body=${body}`;
 }
 
-/////////////////////////////// Editor (full-screen) ///////////////////////////////
+/////////////////////////////// Editor (full-screen) — Part 1 setup ///////////////////////////////
 function setToolActive(id){ ['toolEyedrop','toolLasso','toolPan'].forEach(x=>{ const b=document.getElementById(x); if(!b) return; (x===id)? b.classList.add('active'):b.classList.remove('active'); }); }
 function renderEditorPalette(){
   if(!els.editorPalette) return; els.editorPalette.innerHTML='';
@@ -803,45 +620,55 @@ function openEditor(){
   editor.octx=els.editOverlay.getContext('2d',{willReadFrequently:true});
   editor.ectx.imageSmoothingEnabled=false; editor.octx.imageSmoothingEnabled=false;
 
-  editor.ectx.clearRect(0,0,els.editCanvas.width,els.editCanvas.height);
-  editor.ectx.drawImage(els.srcCanvas,0,0,els.editCanvas.width,els.editCanvas.height);
+  // Reset view transform
+  state.view = { scale: 1, tx: 0, ty: 0 };
 
+  redrawEditor();
   editor.tool='eyedrop'; setToolActive('toolEyedrop');
   editor.lassoPts=[]; editor.lassoActive=false; drawLassoStroke(false);
   editor.eyedropTimer=null; editor.currentHex='#000000';
-  renderEditorPalette(); buildLassoChecks(); enableEditorEyedrop();
+  renderEditorPalette(); buildLassoChecks();
 
-  if(!tipSeen('editor_open')){
-    toast('Eyedrop is active. Press & hold to sample. Tap “Add” to put it in the palette.', 'tip', 4200);
-    markTip('editor_open');
+  // First-use hints
+  const hints = loadHints();
+  if(!hints.editor){
+    Toast.show('Tip: Long-press to sample; “Add” puts it in your palette.');
+    Toast.show('Lasso: draw a loop → pick allowed colors → Save region.');
+    hints.editor = true; saveHints(hints);
   }
+
+  enableEditorEyedrop();
+  enableEditorGestures();
 }
 function closeEditor(){
   if(!editor.active) return;
-  disableEditorEyedrop(); disableEditorLasso();
+  disableEditorEyedrop(); disableEditorLasso(); disableEditorGestures();
   editor.active=false; els.editorOverlay?.classList.add('hidden'); els.editorOverlay?.setAttribute('aria-hidden','true');
 }
 els.openEditor?.addEventListener('click', openEditor);
 els.editorDone?.addEventListener('click', closeEditor);
-els.toolEyedrop?.addEventListener('click', ()=>{ editor.tool='eyedrop'; setToolActive('toolEyedrop'); disableEditorLasso(); enableEditorEyedrop(); });
-els.toolLasso?.addEventListener('click', ()=>{ editor.tool='lasso'; setToolActive('toolLasso'); disableEditorEyedrop(); enableEditorLasso(); if(!tipSeen('lasso_tip')){ toast('Draw a loop to define a region. Then tick allowed colors and “Save region”.','tip',4400); markTip('lasso_tip'); } });
-els.toolPan?.addEventListener('click', ()=>{ editor.tool='pan'; setToolActive('toolPan'); disableEditorEyedrop(); disableEditorLasso(); if(!tipSeen('pan_tip')){ toast('Pan is on. Two fingers to zoom on touch; switch tools any time.','tip',3800); markTip('pan_tip'); } });
+els.toolEyedrop?.addEventListener('click', ()=>{ editor.tool='eyedrop'; setToolActive('toolEyedrop'); disableEditorLasso(); enableEditorEyedrop(); Toast.show('Eyedrop: long-press to pick; tap “Add” to store.'); });
+els.toolLasso?.addEventListener('click', ()=>{ editor.tool='lasso'; setToolActive('toolLasso'); disableEditorEyedrop(); enableEditorLasso(); Toast.show('Lasso: draw a closed loop, then “Save region”.'); });
+els.toolPan?.addEventListener('click', ()=>{ editor.tool='pan'; setToolActive('toolPan'); disableEditorEyedrop(); disableEditorLasso(); Toast.show('Pan/Zoom: drag to move, pinch to zoom.'); });
 
 function pickAtEditor(evt){
   const rect=els.editCanvas.getBoundingClientRect();
-  const x=Math.floor((evt.clientX-rect.left)*els.editCanvas.width/rect.width);
-  const y=Math.floor((evt.clientY-rect.top )*els.editCanvas.height/rect.height);
-  const d=editor.ectx.getImageData(x,y,1,1).data;
+  // inverse transform to sample source correctly when zoomed/panned
+  const xCanvas = (evt.clientX-rect.left) * els.editCanvas.width / rect.width;
+  const yCanvas = (evt.clientY-rect.top ) * els.editCanvas.height/ rect.height;
+  const x = Math.floor((xCanvas - state.view.tx) / state.view.scale);
+  const y = Math.floor((yCanvas - state.view.ty) / state.view.scale);
+  const d=editor.ectx.getImageData(clamp(x,0,els.editCanvas.width-1), clamp(y,0,els.editCanvas.height-1),1,1).data;
   return rgbToHex(d[0],d[1],d[2]);
 }
 function showEye(hex){ if(els.eyeSwatch) els.eyeSwatch.style.background=hex; if(els.eyeHex) els.eyeHex.textContent=hex; }
 function eyedropStart(evt){ evt.preventDefault(); clearTimeout(editor.eyedropTimer);
   editor.eyedropTimer=setTimeout(()=>{ editor.currentHex=pickAtEditor(evt); showEye(editor.currentHex);
     const rect=els.editCanvas.getBoundingClientRect();
-    const cx=(evt.clientX-rect.left)*els.editCanvas.width/rect.width;
-    const cy=(evt.clientY-rect.top )*els.editCanvas.height/rect.height;
+    const xCanvas = (evt.clientX-rect.left) * els.editCanvas.width / rect.width;
+    const yCanvas = (evt.clientY-rect.top ) * els.editCanvas.height/ rect.height;
     editor.octx.clearRect(0,0,els.editOverlay.width,els.editOverlay.height);
-    editor.octx.strokeStyle='#93c5fd'; editor.octx.lineWidth=2; editor.octx.beginPath(); editor.octx.arc(cx,cy,14,0,Math.PI*2); editor.octx.stroke();
+    editor.octx.strokeStyle='#93c5fd'; editor.octx.lineWidth=2; editor.octx.beginPath(); editor.octx.arc(xCanvas,yCanvas,14,0,Math.PI*2); editor.octx.stroke();
   },250);
 }
 function eyedropMove(evt){ if(editor.eyedropTimer===null) return; evt.preventDefault(); editor.currentHex=pickAtEditor(evt); showEye(editor.currentHex); }
@@ -864,33 +691,13 @@ els.eyeAdd?.addEventListener('click', ()=>{
     editor.currentHex = rgbToHex(d[0],d[1],d[2]);
     showEye(editor.currentHex);
   }
-  addPaletteRow(editor.currentHex);
-  renderEditorPalette(); buildLassoChecks(); renderCodeList(); updateMailto(); persistPrefs();
-  toast('Color added to palette. Adjust its Tol slider if needed.', 'success', 2600);
+  addPaletteRow(editor.currentHex, 12, 100);
+  renderEditorPalette(); buildLassoChecks(); renderCodeList(); updateMailto(); persistPrefs(); requestPreviewUpdate();
+  Toast.show('Added to palette. Adjust Tolerance & Importance below.');
 });
 els.eyeCancel?.addEventListener('click', ()=>{ editor.octx?.clearRect(0,0,els.editOverlay.width,els.editOverlay.height); });
 
-// Lasso
-function enableEditorLasso(){
-  els.lassoSave.disabled=true; els.lassoClear.disabled=false;
-  els.editCanvas.addEventListener('pointerdown', lassoBegin, {passive:false});
-  els.editCanvas.addEventListener('pointermove', lassoMove, {passive:false});
-  ['pointerup','pointerleave','pointercancel'].forEach(ev=>els.editCanvas.addEventListener(ev, lassoEnd, {passive:false}));
-}
-function disableEditorLasso(){
-  els.editCanvas.removeEventListener('pointerdown', lassoBegin);
-  els.editCanvas.removeEventListener('pointermove', lassoMove);
-  ['pointerup','pointerleave','pointercancel'].forEach(ev=>els.editCanvas.removeEventListener(ev, lassoEnd));
-}
-function lassoBegin(evt){ evt.preventDefault(); editor.lassoPts=[]; editor.lassoActive=true; addLassoPoint(evt); drawLassoStroke(false); }
-function addLassoPoint(evt){
-  const rect=els.editCanvas.getBoundingClientRect();
-  const x=Math.max(0,Math.min(els.editCanvas.width,  Math.round((evt.clientX-rect.left)*els.editCanvas.width /rect.width  )));
-  const y=Math.max(0,Math.min(els.editCanvas.height, Math.round((evt.clientY-rect.top )*els.editCanvas.height/rect.height )));
-  editor.lassoPts.push([x,y]);
-}
-function lassoMove(evt){ if(!editor.lassoActive) return; evt.preventDefault(); addLassoPoint(evt); drawLassoStroke(false); }
-function lassoEnd(evt){ if(!editor.lassoActive) return; evt.preventDefault(); editor.lassoActive=false; drawLassoStroke(true); els.lassoSave.disabled=false; }
+/////////////////////////////// Lasso (mask rasterization kept; save in PART 2) ///////////////////////////////
 function drawLassoStroke(close=false){
   const ctx=editor.octx; if(!ctx) return; ctx.clearRect(0,0,els.editOverlay.width,els.editOverlay.height);
   if(editor.lassoPts.length<2) return;
@@ -910,6 +717,26 @@ function rasterizePolygonToMask(points, targetW, targetH){
   for(let i=0;i<mask.length;i++) mask[i]=img[i*4+3]>0?1:0;
   return mask;
 }
+function enableEditorLasso(){
+  els.lassoSave.disabled=true; els.lassoClear.disabled=false;
+  els.editCanvas.addEventListener('pointerdown', lassoBegin, {passive:false});
+  els.editCanvas.addEventListener('pointermove', lassoMove, {passive:false});
+  ['pointerup','pointerleave','pointercancel'].forEach(ev=>els.editCanvas.addEventListener(ev, lassoEnd, {passive:false}));
+}
+function disableEditorLasso(){
+  els.editCanvas.removeEventListener('pointerdown', lassoBegin);
+  els.editCanvas.removeEventListener('pointermove', lassoMove);
+  ['pointerup','pointerleave','pointercancel'].forEach(ev=>els.editCanvas.removeEventListener(ev, lassoEnd));
+}
+function lassoBegin(evt){ if(editor.tool!=='lasso') return; evt.preventDefault(); editor.lassoPts=[]; editor.lassoActive=true; addLassoPoint(evt); drawLassoStroke(false); }
+function addLassoPoint(evt){
+  const rect=els.editCanvas.getBoundingClientRect();
+  const x=Math.max(0,Math.min(els.editCanvas.width,  Math.round((evt.clientX-rect.left)*els.editCanvas.width /rect.width  )));
+  const y=Math.max(0,Math.min(els.editCanvas.height, Math.round((evt.clientY-rect.top )*els.editCanvas.height/rect.height )));
+  editor.lassoPts.push([x,y]);
+}
+function lassoMove(evt){ if(!editor.lassoActive) return; evt.preventDefault(); addLassoPoint(evt); drawLassoStroke(false); }
+function lassoEnd(evt){ if(!editor.lassoActive) return; evt.preventDefault(); editor.lassoActive=false; drawLassoStroke(true); els.lassoSave.disabled=false; }
 els.lassoClear?.addEventListener('click', ()=>{ editor.lassoPts=[]; drawLassoStroke(false); els.lassoSave.disabled=true; els.lassoClear.disabled=true; });
 els.lassoSave?.addEventListener('click', ()=>{
   if(!editor.lassoPts.length) return;
@@ -917,52 +744,114 @@ els.lassoSave?.addEventListener('click', ()=>{
   [...els.lassoChecks.querySelectorAll('input[type=checkbox]')].forEach((cb,i)=>{ if(cb.checked) allowed.add(i); });
   const mask=rasterizePolygonToMask(editor.lassoPts, els.srcCanvas.width, els.srcCanvas.height);
   regions.push({ type:'polygon', points: editor.lassoPts.map(p=>[p[0],p[1]]), mask, allowed });
-  alert('Lasso region saved.');
-  toast('Region saved. Mapping will only use checked colors here.', 'success', 2600);
+  Toast.show('Region saved. Pixels inside will only map to the checked colors.');
   editor.lassoPts=[]; drawLassoStroke(false); els.lassoSave.disabled=true; els.lassoClear.disabled=true;
+  requestPreviewUpdate();
 });
 
-/////////////////////////////// Codes UI + Report + Email ///////////////////////////////
-function wireCodesUI(){
-  if (els.colorCodeMode) {
-    els.colorCodeMode.value = state.codeMode;
-    els.colorCodeMode.addEventListener('change', ()=>{
-      state.codeMode = els.colorCodeMode.value === 'hex' ? CODE_MODES.HEX : CODE_MODES.PMS;
-      persistPrefs();
-      renderCodeList();
-      updateMailto();
-    });
+/////////////////////////////// Editor Gestures: Pan & Pinch ///////////////////////////////
+function enableEditorGestures(){
+  const c = els.editCanvas;
+  c.addEventListener('pointerdown', onPointerDown, {passive:false});
+  c.addEventListener('pointermove', onPointerMove, {passive:false});
+  c.addEventListener('pointerup', onPointerUp, {passive:false});
+  c.addEventListener('pointercancel', onPointerUp, {passive:false});
+  c.addEventListener('wheel', onWheel, {passive:false});
+}
+function disableEditorGestures(){
+  const c = els.editCanvas;
+  c.removeEventListener('pointerdown', onPointerDown);
+  c.removeEventListener('pointermove', onPointerMove);
+  c.removeEventListener('pointerup', onPointerUp);
+  c.removeEventListener('pointercancel', onPointerUp);
+  c.removeEventListener('wheel', onWheel);
+}
+let activePointers = new Map();
+function onPointerDown(e){ if(editor.tool!=='pan') return; e.preventDefault(); cSet(e); if(activePointers.size===1){ editor.dragging=true; editor.lastX=e.clientX; editor.lastY=e.clientY; editor.start = {...state.view}; } }
+function onPointerMove(e){
+  if(editor.tool!=='pan') return; e.preventDefault(); cSet(e);
+  if(activePointers.size===2){
+    const pts=[...activePointers.values()];
+    const d= Math.hypot(pts[0].x-pts[1].x, pts[0].y-pts[1].y);
+    if(!editor.pinchD) editor.pinchD=d;
+    const scale = clamp(editor.start.scale * (d / editor.pinchD), 0.25, 8);
+    const cx=(pts[0].x+pts[1].x)/2, cy=(pts[0].y+pts[1].y)/2;
+    const dx = (cx - editor.lastX), dy=(cy - editor.lastY);
+    state.view.scale = scale;
+    state.view.tx = editor.start.tx + dx;
+    state.view.ty = editor.start.ty + dy;
+    redrawEditor();
+  } else if(editor.dragging){
+    const dx = e.clientX - editor.lastX;
+    const dy = e.clientY - editor.lastY;
+    state.view.tx = editor.start.tx + dx;
+    state.view.ty = editor.start.ty + dy;
+    redrawEditor();
   }
-  els.exportReport?.addEventListener('click', ()=>{
-    const txt = buildPrinterReportByMode();
-    const blob = new Blob([txt], {type:'text/plain'});
-    const a = document.createElement('a');
-    a.download = state.codeMode === CODE_MODES.PMS ? 'pms_report.txt' : 'hex_report.txt';
-    a.href = URL.createObjectURL(blob);
-    a.click();
-    setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
-  });
+}
+function onPointerUp(e){ if(editor.tool!=='pan') return; e.preventDefault(); cDel(e); if(activePointers.size<2) editor.pinchD=0; if(activePointers.size===0){ editor.dragging=false; } }
+function onWheel(e){
+  if(editor.tool!=='pan') return; e.preventDefault();
+  const delta = Math.sign(e.deltaY) * -0.1;
+  const newScale = clamp(state.view.scale * (1+delta), 0.25, 8);
+  // Zoom around cursor
+  const rect=els.editCanvas.getBoundingClientRect();
+  const cx=(e.clientX-rect.left)*els.editCanvas.width/rect.width;
+  const cy=(e.clientY-rect.top )*els.editCanvas.height/rect.height;
+  const sx = cx - (cx - state.view.tx) * (newScale/state.view.scale);
+  const sy = cy - (cy - state.view.ty) * (newScale/state.view.scale);
+  state.view.scale = newScale; state.view.tx = sx; state.view.ty = sy;
+  redrawEditor();
+}
+function cSet(e){ activePointers.set(e.pointerId, {x:e.clientX, y:e.clientY}); }
+function cDel(e){ activePointers.delete(e.pointerId); }
 
-  const observer = new MutationObserver(()=>{ renderCodeList(); updateMailto(); refreshPatternSelects(); });
-  observer.observe(els.paletteList, { childList:true, subtree:true });
-
-  renderCodeList();
-  updateMailto();
+function redrawEditor(){
+  const w=els.editCanvas.width, h=els.editCanvas.height;
+  editor.ectx.clearRect(0,0,w,h);
+  editor.ectx.save();
+  editor.ectx.imageSmoothingEnabled=false;
+  editor.ectx.translate(state.view.tx, state.view.ty);
+  editor.ectx.scale(state.view.scale, state.view.scale);
+  editor.ectx.drawImage(els.srcCanvas,0,0,els.srcCanvas.width,els.srcCanvas.height);
+  editor.ectx.restore();
 }
 
-/////////////////////////////// Edge Sharpen (optional) ///////////////////////////////
-function unsharpMask(imageData, amount=0.35){
+/////////////////////////////// Edge-aware Sharpen (kernel only; applied in PART 2) ///////////////////////////////
+function unsharpMaskEdgeAware(imageData, amount=0.35, edgeT=28){
   const w=imageData.width, h=imageData.height, src=imageData.data;
   const out=new ImageData(w,h);
   out.data.set(src);
-  const k=[0,-1,0,-1,5,-1,0,-1,0];
+
+  // Sobel edge magnitude
+  const gx=[-1,0,1,-2,0,2,-1,0,1];
+  const gy=[-1,-2,-1,0,0,0,1,2,1];
+  const mag=new Uint16Array(w*h);
   for(let y=1;y<h-1;y++){
     for(let x=1;x<w-1;x++){
+      let sxr=0, sxg=0, sxb=0, syr=0, syg=0, syb=0, k=0;
+      for(let dy=-1;dy<=1;dy++){
+        for(let dx=-1;dx<=1;dx++,k++){
+          const i=((y+dy)*w+(x+dx))*4, gxl=gx[k], gyl=gy[k];
+          sxr += src[i]*gxl; sxg += src[i+1]*gxl; sxb += src[i+2]*gxl;
+          syr += src[i]*gyl; syg += src[i+1]*gyl; syb += src[i+2]*gyl;
+        }
+      }
+      const m = (Math.abs(sxr)+Math.abs(sxg)+Math.abs(sxb)+Math.abs(syr)+Math.abs(syg)+Math.abs(syb))/6;
+      mag[y*w+x] = m;
+    }
+  }
+
+  // Simple sharpen kernel only where edges are strong
+  const k3=[0,-1,0,-1,5,-1,0,-1,0];
+  for(let y=1;y<h-1;y++){
+    for(let x=1;x<w-1;x++){
+      if(mag[y*w+x] < edgeT) continue; // only sharpen on edges
       let r=0,g=0,b=0, ki=0;
       for(let dy=-1;dy<=1;dy++){
         for(let dx=-1;dx<=1;dx++,ki++){
-          const i=((y+dy)*w+(x+dx))*4, kv=k[ki];
-          r += src[i  ] * kv; g += src[i+1] * kv; b += src[i+2] * kv;
+          const i=((y+dy)*w+(x+dx))*4, kv=k3[ki];
+          r += src[i] * kv; g += src[i+1] * kv; b += src[i+2] * kv;
         }
       }
       const o=(y*w+x)*4;
@@ -975,9 +864,16 @@ function unsharpMask(imageData, amount=0.35){
   return out;
 }
 
-/////////////////////////////// UI Actions ///////////////////////////////
-function updateWeightsUI(){ els.wChromaOut && (els.wChromaOut.textContent=fmtMult(els.wChroma.value)); els.wLightOut && (els.wLightOut.textContent=fmtMult(els.wLight.value)); }
+/////////////////////////////// Mapping preview trigger ///////////////////////////////
+const requestPreviewUpdate = debounce(()=> {
+  // PART 2 will implement: runPaletteMapPreview()
+  if(!els.srcCanvas.width) return;
+  if(!getPalette().length) return;
+  try { runPaletteMapPreview(); } catch(e){ console.warn('preview map pending PART 2', e); }
+}, 140);
 
+/////////////////////////////// Wire basic UI (file inputs, palette, codes) ///////////////////////////////
+function updateWeightsUI(){ if(els.wChromaOut) els.wChromaOut.textContent=fmtMult(els.wChroma.value); if(els.wLightOut) els.wLightOut.textContent=fmtMult(els.wLight.value); }
 function bindEvents(){
   // Upload inputs
   els.fileInput?.addEventListener('change', e=>{ const f=e.target.files?.[0]; if(f) handleFile(f,'file'); });
@@ -1011,10 +907,10 @@ function bindEvents(){
   // Reset
   els.resetBtn?.addEventListener('click', ()=>{ if(!state.fullBitmap) return; drawPreviewFromState(); });
 
-  // Palette buttons
-  els.addColor?.addEventListener('click', ()=>{ addPaletteRow('#FFFFFF'); renderCodeList(); updateMailto(); persistPrefs(); });
-  els.clearColors?.addEventListener('click', ()=>{ els.paletteList.innerHTML=''; renderCodeList(); updateMailto(); persistPrefs(); });
-  els.loadExample?.addEventListener('click', ()=>{ setPalette(['#FFFFFF','#B3753B','#5B3A21','#D22C2C','#1D6E2E']); renderCodeList(); updateMailto(); persistPrefs(); });
+  // Palette
+  els.addColor?.addEventListener('click', ()=>{ addPaletteRow('#FFFFFF', 12, 100); renderCodeList(); updateMailto(); persistPrefs(); requestPreviewUpdate(); });
+  els.clearColors?.addEventListener('click', ()=>{ els.paletteList.innerHTML=''; renderCodeList(); updateMailto(); persistPrefs(); requestPreviewUpdate(); });
+  els.loadExample?.addEventListener('click', ()=>{ setPalette(['#FFFFFF','#B3753B','#5B3A21','#D22C2C','#1D6E2E'].map(h=>[h,12,100])); renderCodeList(); updateMailto(); persistPrefs(); requestPreviewUpdate(); });
   els.savePalette?.addEventListener('click', ()=>{
     const name=prompt('Save palette as (optional name):') || `Palette ${Date.now()}`;
     const colors=getPalette().map(([r,g,b])=>rgbToHex(r,g,b));
@@ -1030,189 +926,20 @@ function bindEvents(){
     if(!els.srcCanvas.width){ alert('Load an image first.'); return; }
     const k=clamp(parseInt(els.kColors.value||'5',10),2,16);
     const img=sctx.getImageData(0,0,els.srcCanvas.width,els.srcCanvas.height);
-    const centers=kmeans(img.data,k,10); setPalette(centers.map(([r,g,b])=>rgbToHex(r,g,b)));
-    renderCodeList(); updateMailto(); persistPrefs();
-    toast('Palette extracted from image. Tweak colors or add more manually.', 'success', 3000);
+    const centers=kmeans(img.data,k,10); setPalette(centers.map(([r,g,b])=>[rgbToHex(r,g,b),12,100]));
+    renderCodeList(); updateMailto(); persistPrefs(); requestPreviewUpdate();
   });
 
-  // Weight outputs
+  // Weight outputs (kept for global Lab weight; still useful)
   ['input','change'].forEach(ev=>{ els.wChroma?.addEventListener(ev, updateWeightsUI); els.wLight?.addEventListener(ev, updateWeightsUI); });
 
-  // APPLY: full-res pipeline with optional sharpen + per-color tol/pattern
-  els.applyBtn?.addEventListener('click', async ()=>{
-    const palMeta=getPaletteWithMeta(); if(!palMeta.length){ toast('Add at least one color to the palette first.', 'warn', 2600); alert('Add at least one color.'); return; }
-    const wL=parseInt(els.wLight.value,10)/100, wC=parseInt(els.wChroma.value,10)/100;
-    const dither=!!els.useDither.checked, bgMode=els.bgMode.value;
-
-    // FULL SIZE processing canvas
-    let procCanvas, pctx;
-    let usingFull = !!els.keepFullRes.checked && state.fullBitmap;
-    if (usingFull) {
-      const baseW = state.fullW, baseH = state.fullH, o = state.exifOrientation || 1;
-      const dims = getOrientedDims(o, baseW, baseH);
-      procCanvas = document.createElement('canvas');
-      procCanvas.width  = dims.w;
-      procCanvas.height = dims.h;
-      pctx = procCanvas.getContext('2d', { willReadFrequently:true });
-      pctx.imageSmoothingEnabled = false;
-      if (o === 1 && state.fullBitmap instanceof ImageBitmap) pctx.drawImage(state.fullBitmap, 0, 0);
-      else drawImageWithOrientation(pctx, state.fullBitmap, dims.w, dims.h, o);
-    } else {
-      procCanvas=els.srcCanvas;
-      pctx=procCanvas.getContext('2d', { willReadFrequently:true });
-      pctx.imageSmoothingEnabled=false;
-    }
-
-    // Effective regions at procCanvas resolution
-    let effectiveRegions=[];
-    if(regions.length){
-      if(usingFull){
-        const sx=procCanvas.width/els.srcCanvas.width, sy=procCanvas.height/els.srcCanvas.height;
-        effectiveRegions = regions.map(r=>{
-          if(r.type==='polygon'){
-            const full=scaleMask(r.mask, els.srcCanvas.width, els.srcCanvas.height, procCanvas.width, procCanvas.height);
-            return { type:'polygon', mask:full, allowed:r.allowed };
-          } else { return { ...scaleRect(normalizeRect(r), sx, sy), allowed:r.allowed }; }
-        });
-      } else {
-        effectiveRegions = regions.map(r=> r.type==='polygon' ? { type:'polygon', mask:r.mask, allowed:r.allowed } : normalizeRect(r));
-      }
-    }
-
-    // Generate output at FULL resolution
-    const srcData = pctx.getImageData(0,0,procCanvas.width,procCanvas.height);
-
-    if (els.useHalftone?.checked) {
-      pctx.clearRect(0,0,procCanvas.width,procCanvas.height);
-      const cell=clamp(parseInt(els.dotCell?.value||'6',10),3,64);
-      const bgHex=(els.dotBg?.value||'#FFFFFF').toUpperCase();
-      const jitter=!!els.dotJitter?.checked;
-      renderHalftone(pctx, srcData, palMeta, bgHex, cell, jitter, wL, wC, effectiveRegions);
-
-      const fullHalftone = pctx.getImageData(0,0,procCanvas.width,procCanvas.height);
-      els.outCanvas._fullImageData = fullHalftone;
-
-    } else {
-      let outFull = mapToPalette(srcData, palMeta, wL, wC, dither, bgMode, effectiveRegions);
-      if (els.sharpenEdges && els.sharpenEdges.checked) {
-        outFull = unsharpMask(outFull, 0.35);
-      }
-      els.outCanvas._fullImageData = outFull;
-    }
-
-    // Sharp preview (downscaled only for display)
-    const previewW = Math.min(procCanvas.width, parseInt(els.maxW.value,10));
-    const scale    = previewW / procCanvas.width;
-    els.outCanvas.width  = Math.round(procCanvas.width  * scale);
-    els.outCanvas.height = Math.round(procCanvas.height * scale);
-    octx.clearRect(0,0,els.outCanvas.width,els.outCanvas.height);
-    octx.imageSmoothingEnabled = false;
-
-    const tmp = document.createElement('canvas');
-    tmp.width = els.outCanvas._fullImageData.width;
-    tmp.height = els.outCanvas._fullImageData.height;
-    const tctx = tmp.getContext('2d', { willReadFrequently:true });
-    tctx.imageSmoothingEnabled = false;
-    tctx.putImageData(els.outCanvas._fullImageData, 0, 0);
-
-    octx.drawImage(tmp, 0, 0, els.outCanvas.width, els.outCanvas.height);
-
-    els.downloadBtn.disabled = false;
-    toast('Mapped! Preview is scaled for speed; “Download PNG” exports full-res.', 'success', 3600);
-  });
-
-  // Download PNG (lossless from full-res ImageData)
-  els.downloadBtn?.addEventListener('click', ()=>{
-    const full = els.outCanvas._fullImageData;
-    if (!full) { alert('Nothing to export yet.'); return; }
-    const c = document.createElement('canvas');
-    c.width  = full.width;
-    c.height = full.height;
-    const cx = c.getContext('2d', { willReadFrequently:true });
-    cx.imageSmoothingEnabled = false;
-    cx.putImageData(full, 0, 0);
-    c.toBlob(blob=>{
-      const a=document.createElement('a');
-      a.download='mapped_fullres.png';
-      a.href=URL.createObjectURL(blob);
-      a.click();
-      setTimeout(()=>URL.revokeObjectURL(a.href), 1500);
-      toast('Saved mapped_fullres.png (full resolution).', 'success', 2600);
-    }, 'image/png');
-  });
-
-  // Projects pane & actions
-  els.openProjects?.addEventListener('click', ()=>setPane(true));
-  els.closeProjects?.addEventListener('click', ()=>setPane(false));
-  els.refreshProjects?.addEventListener('click', refreshProjectsList);
-
-  els.saveProject?.addEventListener('click', async ()=>{
-    if(!state.fullBitmap){ alert('Load an image first.'); return; }
-    const name=prompt('Project name?')||`Project ${Date.now()}`;
-
-    // Save oriented original as PNG
-    const o=state.exifOrientation||1;
-    const {w:ow,h:oh}=getOrientedDims(o,state.fullW,state.fullH);
-    const tmp=document.createElement('canvas'); tmp.width=ow; tmp.height=oh; const tc=tmp.getContext('2d');
-    tc.imageSmoothingEnabled=false;
-    if (o===1 && state.fullBitmap instanceof ImageBitmap) tc.drawImage(state.fullBitmap,0,0,ow,oh);
-    else drawImageWithOrientation(tc, state.fullBitmap, ow, oh, o);
-
-    const blob=await new Promise(res=>tmp.toBlob(res,'image/png',0.92));
-    const rec={ id: state.selectedProjectId||undefined, name, createdAt:Date.now(), updatedAt:Date.now(), settings:getCurrentSettings(), imageBlob:blob };
-    const id=await dbPutProject(rec); state.selectedProjectId=id; await refreshProjectsList(); toast('Project saved. Find it later in Projects → Load.','success',3000);
-  });
-
-  els.exportProject?.addEventListener('click', async ()=>{
-    const id=state.selectedProjectId; if(!id){ alert('Select a project first.'); return; }
-    const rec=await dbGet(id); if(!rec){ alert('Project not found.'); return; }
-    const b64=await blobToBase64(rec.imageBlob);
-    const out={ name:rec.name, createdAt:rec.createdAt, updatedAt:rec.updatedAt, settings:rec.settings, imageBase64:b64 };
-    const blob=new Blob([JSON.stringify(out)],{type:'application/json'}); const a=document.createElement('a'); a.download=(rec.name||'project')+'.json'; a.href=URL.createObjectURL(blob); a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),2000);
-    toast('Project exported as JSON.', 'success', 2400);
-  });
-
-  els.importProject?.addEventListener('change', async (e)=>{
-    const f=e.target.files?.[0]; if(!f) return; const text=await f.text();
-    try{
-      const obj=JSON.parse(text);
-      if(!obj.imageBase64 || !obj.settings){ alert('Invalid project file.'); return; }
-      const blob=base64ToBlob(obj.imageBase64);
-      const rec={ name:obj.name||`Imported ${Date.now()}`, createdAt:obj.createdAt||Date.now(), updatedAt:Date.now(), settings:obj.settings, imageBlob:blob };
-      const id=await dbPutProject(rec); await refreshProjectsList(); await loadProject(id); setPane(false); toast('Project imported and loaded.','success',2800);
-    }catch{ alert('Invalid JSON.'); } finally { e.target.value=''; }
-  });
-
-  els.deleteProject?.addEventListener('click', async ()=>{
-    const id=state.selectedProjectId; if(!id){ alert('Select a project then Delete.'); return; }
-    if(!confirm('Delete selected project?')) return; await dbDelete(id); state.selectedProjectId=null; await refreshProjectsList();
-  });
-
-  // Desktop ALT-click sampler on the preview
-  els.srcCanvas.addEventListener('click',(evt)=>{
-    if(!evt.altKey) return;
-    const rect=els.srcCanvas.getBoundingClientRect();
-    const x=Math.floor((evt.clientX-rect.left)*els.srcCanvas.width/rect.width);
-    const y=Math.floor((evt.clientY-rect.top )*els.srcCanvas.height/rect.height);
-    const d=sctx.getImageData(x,y,1,1).data; addPaletteRow(rgbToHex(d[0],d[1],d[2]));
-    renderCodeList(); updateMailto(); persistPrefs();
-    toast('Color added. Adjust its Tol slider if needed.', 'success', 2200);
-  });
-
-  // Halftone hint
-  els.useHalftone?.addEventListener('change', ()=>{
-    if(els.useHalftone.checked && !tipSeen('halftone_tip')){
-      toast('Dots approximate tone using your palette. Try a smaller Cell for more detail.', 'tip', 4200);
-      markTip('halftone_tip');
-    }
-  });
+  // APPLY (full-res) & Download wired in PART 2
 }
 
 /////////////////////////////// Settings & Persistence ///////////////////////////////
 function getCurrentSettings(){
   return {
-    palette: getPalette().map(([r,g,b])=>rgbToHex(r,g,b)),
-    paletteMeta: getPaletteWithMeta().map(p=>({ tol:p.tol, pattern:p.pattern })), // persist tol + pattern
+    palette: getPalette().map(([r,g,b,tol,weight])=>({ hex: rgbToHex(r,g,b), tol, weight })),
     maxW: parseInt(els.maxW.value,10),
     keepFullRes: !!els.keepFullRes.checked,
     sharpenEdges: !!(els.sharpenEdges && els.sharpenEdges.checked),
@@ -1229,13 +956,12 @@ function getCurrentSettings(){
       if(r.type==='polygon'){ return { type:'polygon', points:r.points, allowed:Array.from(r.allowed) }; }
       return { type:'rect', x0:r.x0,y0:r.y0,x1:r.x1,y1:r.y1, allowed:Array.from(r.allowed) };
     }),
+    textureRules: state.textureRules.slice()
   };
 }
 function applySettings(s){
   if(!s) return;
-  if(s.palette){
-    setPalette(s.palette, s.paletteMeta||null);
-  }
+  if(s.palette) setPalette(s.palette.map(p=>[p.hex, p.tol??12, p.weight??100]));
   if(s.maxW) els.maxW.value=s.maxW;
   if('keepFullRes' in s) els.keepFullRes.checked=!!s.keepFullRes;
   if('sharpenEdges' in s && els.sharpenEdges) els.sharpenEdges.checked=!!s.sharpenEdges;
@@ -1243,11 +969,12 @@ function applySettings(s){
   if(s.wLight) els.wLight.value=s.wLight;
   if('useDither' in s) els.useDither.checked=!!s.useDither;
   if(s.bgMode) els.bgMode.value=s.bgMode;
-  if('useHalftone' in s && els.useHalftone) els.useHalftone.checked=!!s.useHalftone;
-  if(s.dotCell && els.dotCell) els.dotCell.value=s.dotCell;
-  if(s.dotBg && els.dotBg) els.dotBg.value=s.dotBg;
-  if('dotJitter' in s && els.dotJitter) els.dotJitter.checked=!!s.dotJitter;
+  if('useHalftone' in s) els.useHalftone.checked=!!s.useHalftone;
+  if(s.dotCell) els.dotCell.value=s.dotCell;
+  if(s.dotBg) els.dotBg.value=s.dotBg;
+  if('dotJitter' in s) els.dotJitter.checked=!!s.dotJitter;
   if(s.codeMode) state.codeMode = (s.codeMode === CODE_MODES.HEX ? CODE_MODES.HEX : CODE_MODES.PMS);
+  if(Array.isArray(s.textureRules)) state.textureRules = s.textureRules.slice();
   updateWeightsUI();
   regions.length=0;
   if(s.regions && Array.isArray(s.regions)){
@@ -1256,27 +983,11 @@ function applySettings(s){
       else { regions.push({ x0:r.x0,y0:r.y0,x1:r.x1,y1:r.y1, allowed:new Set(r.allowed||[]) }); }
     });
   }
-
-  // If paletteMeta provided after DOM is rebuilt, set controls accordingly
-  if(s.palette && s.paletteMeta){
-    const rows=[...els.paletteList.querySelectorAll('.palette-item')];
-    s.paletteMeta.forEach((m,i)=>{
-      const r=rows[i]; if(!r) return;
-      const tol=r.querySelector('.tolRange'); if(tol){ tol.value=clamp(m.tol||100,50,200); r.querySelector('.tolv').textContent=fmtMult(tol.value); }
-      const A=r.querySelector('.patA'), B=r.querySelector('.patB');
-      const en=r.querySelector('.patEnable'), bal=r.querySelector('.patBal'), balv=r.querySelector('.patBalv'), cell=r.querySelector('.patCell');
-      if(typeof m.pattern?.aIdx==='number' && A) A.selectedIndex = clamp(m.pattern.aIdx,0,rows.length-1);
-      if(typeof m.pattern?.bIdx==='number' && B) B.selectedIndex = clamp(m.pattern.bIdx,0,rows.length-1);
-      if(en) en.checked = !!m.pattern?.enabled;
-      if(bal && balv){ bal.value = clamp(m.pattern?.balance||50,0,100); balv.textContent = `${bal.value}%`; }
-      if(cell){ cell.value = clamp(m.pattern?.cell||6,3,64); }
-    });
-  }
+  requestPreviewUpdate();
 }
 function persistPrefs(){
   const p = {
-    lastPalette: getPalette().map(([r,g,b])=>rgbToHex(r,g,b)),
-    lastPaletteMeta: getPaletteWithMeta().map(pm=>({tol:pm.tol, pattern:pm.pattern})),
+    lastPalette: getPalette().map(([r,g,b,tol,weight])=>({hex:rgbToHex(r,g,b), tol, weight})),
     keepFullRes: els.keepFullRes.checked,
     sharpenEdges: !!(els.sharpenEdges && els.sharpenEdges.checked),
     maxW: parseInt(els.maxW.value,10),
@@ -1318,24 +1029,82 @@ async function refreshProjectsList(){
   });
 }
 
-/////////////////////////////// Mask scaling helper ///////////////////////////////
-function scaleMask(mask,w0,h0,w1,h1){
-  const c0=document.createElement('canvas'); c0.width=w0; c0.height=h0; const x0=c0.getContext('2d'); const id0=x0.createImageData(w0,h0);
-  for(let i=0;i<w0*h0;i++){ const k=i*4; id0.data[k]=255; id0.data[k+1]=255; id0.data[k+2]=255; id0.data[k+3]=mask[i]?255:0; }
-  x0.putImageData(id0,0,0);
-  const c1=document.createElement('canvas'); c1.width=w1; c1.height=h1; const x1=c1.getContext('2d'); x1.imageSmoothingEnabled=false; x1.drawImage(c0,0,0,w0,h0,0,0,w1,h1);
-  const out=new Uint8Array(w1*h1); const id1=x1.getImageData(0,0,w1,h1).data; for(let i=0;i<w1*h1;i++) out[i]=id1[i*4+3]>0?1:0; return out;
-}
-
 /////////////////////////////// Init ///////////////////////////////
+function wireCodesUI(){
+  if (els.colorCodeMode) {
+    els.colorCodeMode.value = state.codeMode;
+    els.colorCodeMode.addEventListener('change', ()=>{
+      state.codeMode = els.colorCodeMode.value === 'hex' ? CODE_MODES.HEX : CODE_MODES.PMS;
+      persistPrefs();
+      renderCodeList();
+      updateMailto();
+    });
+  }
+  els.exportReport?.addEventListener('click', ()=>{
+    const txt = buildPrinterReportByMode();
+    const blob = new Blob([txt], {type:'text/plain'});
+    const a = document.createElement('a');
+    a.download = state.codeMode === CODE_MODES.PMS ? 'pms_report.txt' : 'hex_report.txt';
+    a.href = URL.createObjectURL(blob);
+    a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
+  });
+
+  // Keep mailto up to date when palette changes
+  const observer = new MutationObserver(()=>{ renderCodeList(); updateMailto(); });
+  observer.observe(els.paletteList, { childList:true, subtree:true });
+
+  renderCodeList();
+  updateMailto();
+}
+function bindProjectsUI(){
+  els.openProjects?.addEventListener('click', ()=>setPane(true));
+  els.closeProjects?.addEventListener('click', ()=>setPane(false));
+  els.refreshProjects?.addEventListener('click', refreshProjectsList);
+
+  els.saveProject?.addEventListener('click', async ()=>{
+    if(!state.fullBitmap){ alert('Load an image first.'); return; }
+    const name=prompt('Project name?')||`Project ${Date.now()}`;
+    const o=state.exifOrientation||1;
+    const {w:ow,h:oh}=getOrientedDims(o,state.fullW,state.fullH);
+    const tmp=document.createElement('canvas'); tmp.width=ow; tmp.height=oh; const tc=tmp.getContext('2d');
+    tc.imageSmoothingEnabled=false;
+    if (o===1 && state.fullBitmap instanceof ImageBitmap) tc.drawImage(state.fullBitmap,0,0,ow,oh);
+    else drawImageWithOrientation(tc, state.fullBitmap, ow, oh, o);
+
+    const blob=await new Promise(res=>tmp.toBlob(res,'image/png',0.92));
+    const rec={ id: state.selectedProjectId||undefined, name, createdAt:Date.now(), updatedAt:Date.now(), settings:getCurrentSettings(), imageBlob:blob };
+    const id=await dbPutProject(rec); state.selectedProjectId=id; await refreshProjectsList(); alert('Saved.');
+  });
+
+  els.exportProject?.addEventListener('click', async ()=>{
+    const id=state.selectedProjectId; if(!id){ alert('Select a project first.'); return; }
+    const rec=await dbGet(id); if(!rec){ alert('Project not found.'); return; }
+    const b64=await blobToBase64(rec.imageBlob);
+    const out={ name:rec.name, createdAt:rec.createdAt, updatedAt:rec.updatedAt, settings:rec.settings, imageBase64:b64 };
+    const blob=new Blob([JSON.stringify(out)],{type:'application/json'}); const a=document.createElement('a'); a.download=(rec.name||'project')+'.json'; a.href=URL.createObjectURL(blob); a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+  });
+
+  els.importProject?.addEventListener('change', async (e)=>{
+    const f=e.target.files?.[0]; if(!f) return; const text=await f.text();
+    try{
+      const obj=JSON.parse(text);
+      if(!obj.imageBase64 || !obj.settings){ alert('Invalid project file.'); return; }
+      const blob=base64ToBlob(obj.imageBase64);
+      const rec={ name:obj.name||`Imported ${Date.now()}`, createdAt:obj.createdAt||Date.now(), updatedAt:Date.now(), settings:obj.settings, imageBlob:blob };
+      const id=await dbPutProject(rec); await refreshProjectsList(); await loadProject(id); setPane(false); alert('Imported.');
+    }catch{ alert('Invalid JSON.'); } finally { e.target.value=''; }
+  });
+
+  els.deleteProject?.addEventListener('click', async ()=>{
+    const id=state.selectedProjectId; if(!id){ alert('Select a project then Delete.'); return; }
+    if(!confirm('Delete selected project?')) return; await dbDelete(id); state.selectedProjectId=null; await refreshProjectsList();
+  });
+}
 async function init(){
   try{
-    ensureToastHost();
-
-    // Load prefs
     const prefs=loadPrefs();
-    if(prefs.lastPalette) setPalette(prefs.lastPalette, prefs.lastPaletteMeta||null);
-    else setPalette(['#FFFFFF','#000000']);
+    if(prefs.lastPalette) setPalette(prefs.lastPalette.map(p=>[p.hex, p.tol??12, p.weight??100])); else setPalette(['#FFFFFF','#000000'].map(h=>[h,12,100]));
     if(prefs.keepFullRes!==undefined) els.keepFullRes.checked=!!prefs.keepFullRes;
     if(prefs.sharpenEdges!==undefined && els.sharpenEdges) els.sharpenEdges.checked=!!prefs.sharpenEdges;
     if(prefs.maxW) els.maxW.value=prefs.maxW;
@@ -1352,16 +1121,500 @@ async function init(){
 
     updateWeightsUI(); renderSavedPalettes();
 
-    // Load PMS library
     await loadPmsJson();
-
-    // Wire codes UI now that PMS is available
     wireCodesUI();
-
     refreshProjectsList();
     toggleImageActions(!!state.fullBitmap);
+
+    bindEvents();
+    bindProjectsUI();
+
+    // First-use hint on Lasso/Texture
+    const hints = loadHints();
+    if(!hints.texture){
+      Toast.show('Texture Mode: pick a target color and replace it with a 2-color pattern. (Controls in Mapping section)');
+      hints.texture = true; saveHints(hints);
+    }
   }catch(e){ console.error('Init error:', e); }
 }
-
-bindEvents();
 window.addEventListener('load', init);
+
+/////////////////////////////// Per-color aware mapping core ///////////////////////////////
+/** Build a palette descriptor with per-color tolerance & importance bias
+ *  Returns: [{rgb:[r,g,b], lab:[L,a,b], tol2:number, weight:number}]
+ */
+function buildPerColorPalette(){
+  return getPalette().map(([r,g,b,tol,weight])=>{
+    return {
+      rgb:[r,g,b],
+      lab: rgbToLab(r,g,b),
+      tol2: (tol||12)*(tol||12),
+      weight: Math.max(1, weight||100) // 1..200
+    };
+  });
+}
+
+/** Choose nearest palette index considering:
+ *    - global Lab weights (wL, wC)
+ *    - per-color importance (distance / (weight/100))
+ *    - optional region constraint (allowed Set of palette indices)
+ *    - optional per-color tolerance cutoff (prefer within tol first)
+ */
+function choosePaletteIndex(labPix, pal, wL, wC, allowed){
+  let best = -1, bestD = Infinity;
+  // two-pass: try to satisfy tolerance first
+  let bestTol = -1, bestTolD = Infinity;
+  for (let i=0;i<pal.length;i++){
+    if (allowed && !allowed.has(i)) continue;
+    const p = pal[i];
+    const d2 = deltaE2Weighted(labPix, p.lab, wL, wC);
+    const biased = d2 / (p.weight/100); // higher weight => feels "closer"
+    if (d2 <= p.tol2 && biased < bestTolD){ bestTolD = biased; bestTol = i; }
+    if (biased < bestD){ bestD = biased; best = i; }
+  }
+  return (bestTol >= 0) ? bestTol : best;
+}
+
+/** Floyd–Steinberg with per-color aware quantizer */
+function mapToPalettePerColor(imgData, pal, wL=1, wC=1, dither=false, bgMode='keep', effRegions=[]){
+  const w=imgData.width, h=imgData.height, src=imgData.data;
+  const out=new ImageData(w,h); out.data.set(src);
+
+  if(bgMode!=='keep'){
+    for(let i=0;i<src.length;i+=4){
+      if(bgMode==='white'){ out.data[i+3]=255; }
+      else if(bgMode==='transparent'){ if(src[i+3]<128) out.data[i+3]=0; }
+    }
+  }
+
+  const errR=dither?new Float32Array(w*h):null;
+  const errG=dither?new Float32Array(w*h):null;
+  const errB=dither?new Float32Array(w*h):null;
+
+  for(let y=0;y<h;y++){
+    for(let x=0;x<w;x++){
+      const idx=y*w+x, i4=idx*4; if(out.data[i4+3]===0) continue;
+      let r=out.data[i4], g=out.data[i4+1], b=out.data[i4+2];
+      if(dither){ r=clamp(Math.round(r+errR[idx]),0,255); g=clamp(Math.round(g+errG[idx]),0,255); b=clamp(Math.round(b+errB[idx]),0,255); }
+
+      // region constraint
+      let allowedSet=null;
+      if(effRegions && effRegions.length){
+        for(let ri=effRegions.length-1; ri>=0; ri--){
+          const R=effRegions[ri];
+          if(R.type==='polygon'){ if(R.mask[idx]){ allowedSet=R.allowed; break; } }
+          else if(inRect(x,y,R)){ allowedSet=R.allowed; break; }
+        }
+      }
+
+      const lab=rgbToLab(r,g,b);
+      const pIndex = choosePaletteIndex(lab, pal, wL, wC, allowedSet);
+      const [nr,ng,nb] = pal[pIndex].rgb;
+      out.data[i4]=nr; out.data[i4+1]=ng; out.data[i4+2]=nb;
+
+      if(dither){
+        const er=r-nr, eg=g-ng, eb=b-nb;
+        const push=(xx,yy,fr,fg,fb)=>{ if(xx<0||xx>=w||yy<0||yy>=h) return; const j=yy*w+xx; errR[j]+=fr; errG[j]+=fg; errB[j]+=fb; };
+        push(x+1,y,     er*7/16, eg*7/16, eb*7/16);
+        push(x-1,y+1,   er*3/16, eg*3/16, eb*3/16);
+        push(x,  y+1,   er*5/16, eg*5/16, eb*5/16);
+        push(x+1,y+1,   er*1/16, eg*1/16, eb*1/16);
+      }
+    }
+  }
+  return out;
+}
+
+/////////////////////////////// Texture Mode (replace one color with patterns) ///////////////////////////////
+// Small pattern helpers
+const Bayer4 = [
+  [0, 8, 2,10],
+  [12, 4,14, 6],
+  [3,11, 1, 9],
+  [15, 7,13, 5]
+];
+function patternValue(name, x, y){
+  switch(name){
+    case 'checker': return ((x&1) ^ (y&1)) ? 1 : 0;
+    case 'stripes': return (y & 1) ? 1 : 0;
+    case 'bayer4':  return Bayer4[y&3][x&3] / 15; // 0..1
+    case 'dots':    {
+      // circular mask per 4x4 cell
+      const cx=(x&3)-1.5, cy=(y&3)-1.5;
+      const r2=cx*cx+cy*cy;
+      return r2 < 1.4 ? 1 : 0;
+    }
+    default: return ((x+y)&1)?1:0;
+  }
+}
+/** Apply post-pass texture rules:
+ *  rules: {targetIndex, pattern:'checker'|'stripes'|'bayer4'|'dots', c1Index, c2Index, density:0..1, luminance:boolean}
+ *  If luminance===true, density is derived from source luminance (before quantization) rather than fixed density.
+ */
+function applyTextureRules(imgData, pal, rules, srcRefData=null){
+  if(!rules || !rules.length) return imgData;
+  const w=imgData.width, h=imgData.height, out=imgData.data;
+  const ref = srcRefData ? srcRefData.data : out;
+
+  // Build reverse map hex->index for speed
+  const idxOfHex = new Map(pal.map((p,i)=>[rgbToHex(p.rgb[0],p.rgb[1],p.rgb[2]), i]));
+
+  for(const rule of rules){
+    const { targetIndex, pattern, c1Index, c2Index, density=0.5, luminance=false } = rule;
+    const c1 = pal[c1Index]?.rgb || [0,0,0];
+    const c2 = pal[c2Index]?.rgb || [255,255,255];
+    const targetHex = pal[targetIndex] ? rgbToHex(...pal[targetIndex].rgb) : null;
+
+    for(let y=0;y<h;y++){
+      for(let x=0;x<w;x++){
+        const i4=(y*w+x)*4;
+        if(out[i4+3]===0) continue;
+
+        // Is this pixel currently the target palette color?
+        const pixHex = rgbToHex(out[i4], out[i4+1], out[i4+2]);
+        if(targetHex && pixHex !== targetHex) continue;
+
+        let thr = density;
+        if(luminance){
+          // derive from source luminance (use ref buffer which may be pre-quantized source)
+          const R=ref[i4], G=ref[i4+1], B=ref[i4+2];
+          const L = 0.2126*R + 0.7152*G + 0.0722*B; // 0..255
+          thr = 1 - (L/255); // darker -> more of c1 (assume c1 is darker)
+        }
+
+        const p = patternValue(pattern||'checker', x, y);
+        const chooseC1 = (typeof p === 'number') ? (p < thr) : (!!p && thr>=0.5);
+
+        const rgb = chooseC1 ? c1 : c2;
+        out[i4]=rgb[0]; out[i4+1]=rgb[1]; out[i4+2]=rgb[2];
+      }
+    }
+  }
+  return imgData;
+}
+
+/////////////////////////////// Halftone (from earlier build, adapted) ///////////////////////////////
+function avgColorInCell(data, w, h, x0, y0, sz) {
+  let r=0,g=0,b=0,a=0,count=0;
+  const x1=Math.min(w, x0+sz), y1=Math.min(h, y0+sz);
+  for (let y=y0; y<y1; y++) {
+    let i=(y*w + x0)*4;
+    for (let x=x0; x<x1; x++, i+=4) {
+      const A=data[i+3]; if (A===0) continue;
+      r+=data[i]; g+=data[i+1]; b+=data[i+2]; a+=A; count++;
+    }
+  }
+  if (count===0) return {r:255,g:255,b:255,a:0};
+  return { r:Math.round(r/count), g:Math.round(g/count), b:Math.round(b/count), a:Math.round(a/count) };
+}
+function allowedAt(x, y, w, effRegions){
+  let allowed=null; if (effRegions && effRegions.length){
+    const idx=y*w+x;
+    for (let ri=effRegions.length-1; ri>=0; ri--){
+      const R=effRegions[ri];
+      if (R.type==='polygon'){ if (R.mask[idx]){ allowed=R.allowed; break; } }
+      else if (inRect(x,y,R)){ allowed=R.allowed; break; }
+    }
+  } return allowed;
+}
+function coverageBetweenColors(cellRGB, fgLab, bgLab, wL, wC) {
+  const lab = rgbToLab(cellRGB.r, cellRGB.g, cellRGB.b);
+  const dFg = Math.sqrt(deltaE2Weighted(lab, fgLab, wL, wC));
+  const dBg = Math.sqrt(deltaE2Weighted(lab, bgLab, wL, wC));
+  const eps = 1e-6, wFg = 1/Math.max(eps,dFg), wBg = 1/Math.max(eps,dBg);
+  return wFg / (wFg + wBg);
+}
+function renderHalftone(ctx, imgData, paletteRGB, bgHex, cellSize=6, jitter=false, wL=1.0, wC=1.0, effRegions=[]){
+  const w=imgData.width, h=imgData.height, data=imgData.data;
+  const palLab=paletteRGB.map(([r,g,b])=>({rgb:[r,g,b], lab:rgbToLab(r,g,b)}));
+  const bg=hexToRgb(bgHex)||{r:255,g:255,b:255}; const bgLab=rgbToLab(bg.r,bg.g,b.b);
+
+  ctx.save();
+  ctx.fillStyle = rgbToHex(bg.r,bg.g,bg.b);
+  ctx.fillRect(0,0,w,h);
+
+  for(let y=0;y<h;y+=cellSize){
+    for(let x=0;x<w;x+=cellSize){
+      const cell=avgColorInCell(data,w,h,x,y,cellSize); if(cell.a===0) continue;
+      const cxPix = clamp(Math.floor(x+cellSize*0.5),0,w-1);
+      const cyPix = clamp(Math.floor(y+cellSize*0.5),0,h-1);
+      const allowed = allowedAt(cxPix, cyPix, w, effRegions);
+
+      const lab=rgbToLab(cell.r,cell.g,cell.b);
+      let best=0, bestD=Infinity, found=false;
+      for(let p=0;p<palLab.length;p++){
+        if(allowed && !allowed.has(p)) continue;
+        const d2=deltaE2Weighted(lab,palLab[p].lab,wL,wC);
+        if(d2<bestD){ bestD=d2; best=p; found=true; }
+      }
+      if(!found && palLab.length) best=0;
+
+      const fg=palLab[best];
+      const cov=coverageBetweenColors(cell, fg.lab, bgLab, wL, wC);
+      const maxR=(cellSize*0.5), radius=Math.max(0.4, Math.sqrt(cov)*maxR);
+      let cx=x+cellSize*0.5, cy=y+cellSize*0.5;
+      if(jitter){ const j=cellSize*0.15; cx+=(Math.random()*2-1)*j; cy+=(Math.random()*2-1)*j; }
+      ctx.fillStyle=rgbToHex(fg.rgb[0],fg.rgb[1],fg.rgb[2]);
+      ctx.beginPath(); ctx.arc(cx,cy,radius,0,Math.PI*2); ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
+/////////////////////////////// Preview runner ///////////////////////////////
+function buildEffectiveRegionsFor(canvasW, canvasH){
+  if(!regions.length) return [];
+  // here masks are already at preview resolution (saved from editor using srcCanvas dims)
+  return regions.map(r=>{
+    if(r.type==='polygon'){ return { type:'polygon', mask:r.mask, allowed:r.allowed }; }
+    return normalizeRect(r);
+  });
+}
+
+function runPaletteMapPreview(){
+  const w=els.srcCanvas.width, h=els.srcCanvas.height;
+  if(!w||!h) return;
+  const src = sctx.getImageData(0,0,w,h);
+  const pal = buildPerColorPalette();
+  const wL=parseInt(els.wLight.value,10)/100, wC=parseInt(els.wChroma.value,10)/100;
+  const dither=!!els.useDither.checked, bgMode=els.bgMode.value;
+  const effRegions = buildEffectiveRegionsFor(w,h);
+
+  // Quantize to palette (preview)
+  let mapped = mapToPalettePerColor(src, pal, wL, wC, dither, bgMode, effRegions);
+
+  // Optional edge-aware sharpen for preview (small amount, keeps UI snappy)
+  if (els.sharpenEdges && els.sharpenEdges.checked){
+    mapped = unsharpMaskEdgeAware(mapped, 0.3, 28);
+  }
+
+  // Apply texture rules (post-pass) on the preview buffer
+  if (state.textureRules && state.textureRules.length){
+    applyTextureRules(mapped, pal, state.textureRules, src);
+  }
+
+  // Render to outCanvas
+  els.outCanvas.width = w;
+  els.outCanvas.height = h;
+  octx.putImageData(mapped, 0, 0);
+
+  // save for exports if we’re not going to recompute — still recompute at full-res on Apply
+  els.outCanvas._previewImageData = mapped;
+}
+
+/////////////////////////////// Full-res Apply & Export ///////////////////////////////
+function scaleMask(mask,w0,h0,w1,h1){
+  const c0=document.createElement('canvas'); c0.width=w0; c0.height=h0; const x0=c0.getContext('2d'); const id0=x0.createImageData(w0,h0);
+  for(let i=0;i<w0*h0;i++){ const k=i*4; id0.data[k]=255; id0.data[k+1]=255; id0.data[k+2]=255; id0.data[k+3]=mask[i]?255:0; }
+  x0.putImageData(id0,0,0);
+  const c1=document.createElement('canvas'); c1.width=w1; c1.height=h1; const x1=c1.getContext('2d'); x1.imageSmoothingEnabled=false; x1.drawImage(c0,0,0,w0,h0,0,0,w1,h1);
+  const out=new Uint8Array(w1*h1); const id1=x1.getImageData(0,0,w1,h1).data; for(let i=0;i<w1*h1;i++) out[i]=id1[i*4+3]>0?1:0; return out;
+}
+
+function applyFullRes(){
+  const pal = buildPerColorPalette();
+  if(!pal.length){ alert('Add at least one color.'); return; }
+
+  // Build processing canvas at oriented full size OR preview size
+  let procCanvas, pctx;
+  let usingFull = !!els.keepFullRes.checked && state.fullBitmap;
+  let baseW, baseH, orient = state.exifOrientation||1;
+
+  if(usingFull){
+    const dims = getOrientedDims(orient, state.fullW, state.fullH);
+    baseW=dims.w; baseH=dims.h;
+    procCanvas = document.createElement('canvas');
+    procCanvas.width  = baseW;
+    procCanvas.height = baseH;
+    pctx = procCanvas.getContext('2d', { willReadFrequently:true });
+    pctx.imageSmoothingEnabled = false;
+    if (orient === 1 && state.fullBitmap instanceof ImageBitmap) {
+      pctx.drawImage(state.fullBitmap, 0, 0);
+    } else {
+      drawImageWithOrientation(pctx, state.fullBitmap, baseW, baseH, orient);
+    }
+  } else {
+    procCanvas = els.srcCanvas;
+    baseW = procCanvas.width; baseH = procCanvas.height;
+    pctx = procCanvas.getContext('2d', { willReadFrequently:true });
+    pctx.imageSmoothingEnabled=false;
+  }
+
+  // Effective regions scaled to processing canvas resolution
+  let effectiveRegions=[];
+  if(regions.length){
+    if(usingFull){
+      const sx=baseW/els.srcCanvas.width, sy=baseH/els.srcCanvas.height;
+      effectiveRegions = regions.map(r=>{
+        if(r.type==='polygon'){
+          const full=scaleMask(r.mask, els.srcCanvas.width, els.srcCanvas.height, baseW, baseH);
+          return { type:'polygon', mask:full, allowed:r.allowed };
+        } else { return { ...scaleRect(normalizeRect(r), sx, sy), allowed:r.allowed }; }
+      });
+    } else {
+      effectiveRegions = regions.map(r=> r.type==='polygon' ? { type:'polygon', mask:r.mask, allowed:r.allowed } : normalizeRect(r));
+    }
+  }
+
+  const wL=parseInt(els.wLight.value,10)/100, wC=parseInt(els.wChroma.value,10)/100;
+  const dither=!!els.useDither.checked, bgMode=els.bgMode.value;
+
+  // Compute
+  const srcData = pctx.getImageData(0,0,baseW,baseH);
+  let outFull = mapToPalettePerColor(srcData, pal, wL, wC, dither, bgMode, effectiveRegions);
+
+  // Edge-aware sharpen option
+  if (els.sharpenEdges && els.sharpenEdges.checked){
+    outFull = unsharpMaskEdgeAware(outFull, 0.35, 28);
+  }
+
+  // Texture rules (post-pass)
+  if (state.textureRules && state.textureRules.length){
+    applyTextureRules(outFull, pal, state.textureRules, srcData);
+  }
+
+  // If halftone box is checked, render dots instead of flat palette
+  if (els.useHalftone?.checked){
+    pctx.clearRect(0,0,baseW,baseH);
+    const cell=clamp(parseInt(els.dotCell?.value||'6',10),3,64);
+    const bgHex=(els.dotBg?.value||'#FFFFFF').toUpperCase();
+    const jitter=!!els.dotJitter?.checked;
+    renderHalftone(pctx, outFull, pal.map(p=>p.rgb), bgHex, cell, jitter, wL, wC, effectiveRegions);
+    // capture raster
+    outFull = pctx.getImageData(0,0,baseW,baseH);
+  }
+
+  // Save on outCanvas as preview-scaled view, but _fullImageData holds full res
+  const previewW = Math.min(baseW, parseInt(els.maxW.value,10));
+  const scale    = previewW / baseW;
+  els.outCanvas.width  = Math.round(baseW  * scale);
+  els.outCanvas.height = Math.round(baseH * scale);
+  octx.clearRect(0,0,els.outCanvas.width,els.outCanvas.height);
+  octx.imageSmoothingEnabled = false;
+
+  const tmp = document.createElement('canvas');
+  tmp.width = outFull.width;
+  tmp.height = outFull.height;
+  const tctx = tmp.getContext('2d', { willReadFrequently:true });
+  tctx.imageSmoothingEnabled = false;
+  tctx.putImageData(outFull, 0, 0);
+  octx.drawImage(tmp, 0, 0, els.outCanvas.width, els.outCanvas.height);
+
+  els.outCanvas._fullImageData = outFull;
+  els.downloadBtn.disabled = false;
+
+  Toast.show('Mapping applied. Use “Download PNG” for export.');
+}
+
+/////////////////////////////// Exports ///////////////////////////////
+function exportPng(){
+  const full = els.outCanvas._fullImageData || els.outCanvas._previewImageData;
+  if (!full) { alert('Nothing to export yet. Click “Apply mapping” first.'); return; }
+
+  // optional scale up
+  const scaleSel = els.exportScale && parseInt(els.exportScale.value, 10) || 1;
+  const c = document.createElement('canvas');
+  c.width  = full.width * scaleSel;
+  c.height = full.height * scaleSel;
+  const cx = c.getContext('2d', { willReadFrequently:true });
+  cx.imageSmoothingEnabled = false;
+
+  // put full data on temp then scale draw
+  const tmp = document.createElement('canvas');
+  tmp.width=full.width; tmp.height=full.height;
+  tmp.getContext('2d').putImageData(full,0,0);
+  cx.drawImage(tmp, 0,0, c.width, c.height);
+
+  c.toBlob(blob=>{
+    const a=document.createElement('a');
+    a.download='mapped_fullres.png';
+    a.href=URL.createObjectURL(blob);
+    a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 1500);
+  }, 'image/png');
+}
+
+async function exportSvg(){
+  // Requires vector.js (custom) or ImageTracer available globally
+  const full = els.outCanvas._fullImageData || els.outCanvas._previewImageData;
+  if (!full) { alert('Nothing to vectorize yet. Apply mapping first.'); return; }
+
+  // Prefer custom Vectorize if present
+  if (window.Vectorize && typeof window.Vectorize.imageDataToSvg === 'function'){
+    const svgText = await window.Vectorize.imageDataToSvg(full, { palette:getPalette().map(([r,g,b])=>rgbToHex(r,g,b)) });
+    const blob = new Blob([svgText], {type:'image/svg+xml'});
+    const a = document.createElement('a');
+    a.download = 'mapped.svg';
+    a.href = URL.createObjectURL(blob);
+    a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),1500);
+    return;
+  }
+
+  // Fallback to ImageTracer (if included)
+  if (window.ImageTracer){
+    // Draw ImageData to a canvas for ImageTracer
+    const c=document.createElement('canvas'); c.width=full.width; c.height=full.height;
+    c.getContext('2d').putImageData(full,0,0);
+    const opt = window.ImageTracer.getoptions ? window.ImageTracer.getoptions() : {};
+    // lock palette if available
+    opt.pal = { 'custom': getPalette().map(([r,g,b])=>({r,g,b,a:255})) };
+    opt.palettes = [ 'custom' ];
+    const svgstr = window.ImageTracer.imagedataToSVG(full, opt);
+    const blob = new Blob([svgstr], {type:'image/svg+xml'});
+    const a = document.createElement('a');
+    a.download='mapped.svg';
+    a.href=URL.createObjectURL(blob);
+    a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),1500);
+    return;
+  }
+
+  alert('Vector export requires vector.js or ImageTracer to be included.');
+}
+
+/////////////////////////////// UI wiring for Apply / Download ///////////////////////////////
+els.applyBtn?.addEventListener('click', applyFullRes);
+els.downloadBtn?.addEventListener('click', exportPng);
+els.downloadSvgBtn?.addEventListener('click', exportSvg);
+
+/////////////////////////////// Undo/Redo (light) ///////////////////////////////
+function pushUndo(){
+  state.undo.push(JSON.stringify(getCurrentSettings()));
+  // clear redo when new change
+  state.redo.length = 0;
+}
+function doUndo(){
+  if(!state.undo.length) return;
+  const cur = JSON.stringify(getCurrentSettings());
+  state.redo.push(cur);
+  const prev = state.undo.pop();
+  try{ applySettings(JSON.parse(prev)); }catch(e){}
+}
+function doRedo(){
+  if(!state.redo.length) return;
+  const cur = JSON.stringify(getCurrentSettings());
+  state.undo.push(cur);
+  const next = state.redo.pop();
+  try{ applySettings(JSON.parse(next)); }catch(e){}
+}
+window.addEventListener('keydown', (e)=>{
+  if((e.ctrlKey||e.metaKey) && !e.shiftKey && e.key.toLowerCase()==='z'){ e.preventDefault(); doUndo(); }
+  if((e.ctrlKey||e.metaKey) && (e.shiftKey) && e.key.toLowerCase()==='z'){ e.preventDefault(); doRedo(); }
+});
+
+/////////////////////////////// Live preview on slider changes ///////////////////////////////
+['input','change'].forEach(ev=>{
+  els.wChroma?.addEventListener(ev, requestPreviewUpdate);
+  els.wLight?.addEventListener(ev, requestPreviewUpdate);
+  els.useDither?.addEventListener(ev, requestPreviewUpdate);
+  els.bgMode?.addEventListener(ev, requestPreviewUpdate);
+  els.sharpenEdges?.addEventListener(ev, requestPreviewUpdate);
+  els.useHalftone?.addEventListener(ev, requestPreviewUpdate);
+  els.dotCell?.addEventListener(ev, requestPreviewUpdate);
+  els.dotBg?.addEventListener(ev, requestPreviewUpdate);
+  els.dotJitter?.addEventListener(ev, requestPreviewUpdate);
+});
+
+/////////////////////////////// Done ///////////////////////////////
+Toast.show('Ready. Adjust per-color “Tol ΔE” & “Importance”, then Apply.', 2600);
