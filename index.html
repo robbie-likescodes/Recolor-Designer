@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1" />
   <title>Palette Mapper – Cup Print Helper</title>
-  <link rel="stylesheet" href="./styles.css?v=10" id="app-css" />
+  <link rel="stylesheet" href="./styles.css?v=12" id="app-css" />
 </head>
 <body>
   <header>
@@ -13,7 +13,7 @@
       <p>Reduce photos to limited colors for printing</p>
     </div>
     <div class="header-right">
-      <button id="openProjects" class="ghost" type="button">Projects</button>
+      <button id="openProjects" class="ghost" type="button" style="display:none">Projects</button>
     </div>
   </header>
 
@@ -22,13 +22,11 @@
     <h2>1) Load image</h2>
     <div class="row">
       <input id="fileInput" type="file" accept="image/*" />
-      <label class="filelike">Camera
-        <input id="cameraInput" type="file" accept="image/*" capture="environment" hidden />
-      </label>
+      <input id="cameraInput" type="file" accept="image/*" capture="environment" />
       <button id="pasteBtn" type="button">Paste</button>
       <button id="resetBtn" type="button" disabled>Reset</button>
     </div>
-    <div class="help">Upload works with Photo Library & Camera on iOS. “Camera” forces camera only.</div>
+    <div class="help">Upload lets you choose Photo Library or Camera on iOS. “Camera” forces the camera only.</div>
     <div class="row">
       <label>Max preview width (px) <input id="maxW" type="number" min="600" value="1400" /></label>
       <label class="check"><input id="keepFullRes" type="checkbox" checked /> Process at full resolution</label>
@@ -36,21 +34,15 @@
     </div>
     <div class="panel">
       <div class="panel-head">Original</div>
-      <canvas id="srcCanvas" aria-label="Original image canvas"></canvas>
-      <div class="tiny-help">Press & hold in the editor to pick a color. On desktop, ALT-click on this preview adds a color.</div>
-      <div class="row">
-        <button id="openEditor" type="button">Open full-screen editor</button>
-      </div>
+      <canvas id="srcCanvas"></canvas>
+      <div class="tiny-help">Tip: Long-press (mobile) or ALT-click (desktop) to sample a color.</div>
     </div>
   </section>
 
   <!-- 2) Palette -->
   <section class="card">
     <h2>2) Palette</h2>
-
-    <!-- dynamic palette rows (from app.js) -->
     <div id="paletteList" class="palette-list"></div>
-
     <div class="row">
       <button id="addColor" type="button">+ Add color</button>
       <button id="clearColors" class="ghost" type="button">Clear</button>
@@ -58,15 +50,6 @@
       <button id="savePalette" class="ghost" type="button">Save current</button>
       <button id="clearSavedPalettes" class="ghost" type="button">Clear saved</button>
     </div>
-
-    <details>
-      <summary>Auto-extract from image (optional)</summary>
-      <div class="row">
-        <label>K colors <input id="kColors" type="number" min="2" max="16" value="6" /></label>
-        <button id="autoExtract" type="button" disabled>Auto extract</button>
-      </div>
-    </details>
-
     <h3>Saved Palettes</h3>
     <div id="savedPalettes" class="saved-list"></div>
   </section>
@@ -85,7 +68,7 @@
       </label>
     </div>
     <div class="row">
-      <label class="check"><input id="useDither" type="checkbox" /> Floyd–Steinberg dither</label>
+      <label class="check"><input id="useDither" type="checkbox" /> Use Floyd–Steinberg dithering</label>
       <label>Background
         <select id="bgMode">
           <option value="keep">Keep original</option>
@@ -97,140 +80,46 @@
     <div class="row">
       <button id="applyBtn" type="button" disabled>Apply mapping</button>
       <button id="downloadBtn" type="button" disabled>Download PNG</button>
-      <label>Export scale
-        <select id="exportScale">
-          <option value="1">1×</option>
-          <option value="2">2×</option>
-          <option value="4">4×</option>
-        </select>
-      </label>
-      <button id="downloadSvgBtn" class="ghost" type="button">Download SVG</button>
     </div>
   </section>
 
-  <!-- 4) Texture Mode -->
-  <section class="card">
-    <h2>4) Texture Mode (replace one color)</h2>
-    <div class="help">Pick a palette color to replace with a two-color pattern made from colors in your palette.</div>
+  <!-- 4) Texture / Replace one color -->
+  <section class="card" id="textureCard">
+    <h2>4) Texture / Replace one color</h2>
     <div class="row">
-      <label>Target color
-        <select id="texTarget"></select>
-      </label>
-      <label>Pattern
-        <select id="texPattern">
-          <option value="">(none)</option>
-          <option value="checker">Checker</option>
-          <option value="stripes">Stripes</option>
-          <option value="bayer4">Bayer 4×4</option>
-          <option value="dots">Dots</option>
-        </select>
-      </label>
-      <label>Color A
-        <select id="texC1"></select>
-      </label>
-      <label>Color B
-        <select id="texC2"></select>
-      </label>
+      <button id="suggestBtn" type="button">Suggest replacements…</button>
+      <button id="refreshAllBtn" type="button" class="ghost">Refresh output</button>
     </div>
-    <div class="row">
-      <label>Density <input id="texDensity" type="range" min="0" max="100" value="50" /></label>
-      <label class="check"><input id="texLuma" type="checkbox" /> Density from luminance</label>
-      <button id="texAdd" type="button">Add/Update rule</button>
-      <button id="texClear" class="ghost" type="button">Clear rules</button>
-    </div>
-    <div id="texRulesList" class="tiny-help"></div>
+    <div id="texList" class="tiny-help" style="margin-top:10px"></div>
   </section>
 
-  <!-- 5) Halftone -->
-  <section class="card">
-    <h2>5) Halftone (optional)</h2>
-    <div class="row">
-      <label class="check"><input id="useHalftone" type="checkbox" /> Render as dots</label>
-      <label>Dot cell size <input id="dotCell" type="number" min="3" max="64" value="6" /></label>
-      <label>Background color <input id="dotBg" type="color" value="#FFFFFF" /></label>
-      <label class="check"><input id="dotJitter" type="checkbox" /> Add jitter</label>
-    </div>
-  </section>
-
-  <!-- Output -->
+  <!-- Mapped -->
   <section class="card">
     <h2>Mapped</h2>
     <canvas id="outCanvas"></canvas>
   </section>
 
-  <!-- 6) Codes & Report -->
-  <section class="card">
-    <h2>6) Codes &amp; Report</h2>
-    <label>Show codes as:
-      <select id="colorCodeMode">
-        <option value="pms">PMS (default)</option>
-        <option value="hex">HEX</option>
-      </select>
-    </label>
-    <div id="codeList" class="code-list"></div>
+  <!-- 5) Vector (SVG) -->
+  <section class="card" id="vectorCard">
+    <h2>Vector (SVG)</h2>
     <div class="row">
-      <button id="exportReport" type="button">Export report</button>
-      <a id="mailtoLink" class="ghost" href="#">Email to printer</a>
+      <label>Simplify <input id="vecSimplify" type="range" min="0" max="100" value="35" /></label>
+      <label>Min area <input id="vecMinArea" type="number" min="1" value="8" /></label>
+      <label class="check"><input id="vecLockPal" type="checkbox" checked /> Lock to current palette</label>
+      <button id="exportSvgBtn" type="button">Export SVG</button>
     </div>
+    <div class="help">If <code>vector.js</code> or <code>imagetracer_v1.2.6.js</code> is present, they’ll be used; otherwise a simple built-in tracer runs.</div>
   </section>
 
-  <!-- Projects Drawer -->
-  <aside id="projectsPane" class="projects" aria-hidden="true">
-    <div class="projects-head">
-      <h3>Projects</h3>
-      <button id="closeProjects" class="ghost" type="button">Close</button>
-    </div>
-    <div class="projects-actions row">
-      <button id="saveProject" type="button">Save</button>
-      <button id="refreshProjects" class="ghost" type="button">Refresh</button>
-      <button id="exportProject" class="ghost" type="button">Export</button>
-      <label class="filelike">Import
-        <input id="importProject" type="file" accept="application/json" hidden />
-      </label>
-      <button id="deleteProject" class="ghost danger" type="button">Delete</button>
-    </div>
-    <div id="projectsList" class="projects-list"></div>
-  </aside>
+  <!-- Optional PMS list for future use -->
+  <link rel="preload" href="./pms_solid_coated.json" as="fetch" crossorigin>
 
-  <!-- Full-screen editor -->
-  <div id="editorOverlay" class="hidden" aria-hidden="true">
-    <div class="editor-toolbar">
-      <button id="toolEyedrop" class="active">Eyedrop</button>
-      <button id="toolLasso">Lasso</button>
-      <button id="toolPan">Pan</button>
-      <div class="grow"></div>
-      <button id="editorDone">Done</button>
-    </div>
-    <canvas id="editCanvas"></canvas>
-    <canvas id="editOverlay"></canvas>
-    <aside class="editor-right">
-      <h3>Palette</h3>
-      <div id="editorPalette" class="editor-swatches"></div>
-      <h3>Eyedrop</h3>
-      <div class="row">
-        <span id="eyeSwatch" class="sw"></span>
-        <span id="eyeHex" class="mono">—</span>
-      </div>
-      <div class="row">
-        <button id="eyeAdd" type="button">Add</button>
-        <button id="eyeCancel" class="ghost" type="button">Cancel</button>
-      </div>
-      <h3>Lasso</h3>
-      <div id="lassoChecks" class="lasso-checks"></div>
-      <div class="row">
-        <button id="lassoSave" type="button" disabled>Save region</button>
-        <button id="lassoClear" class="ghost" type="button" disabled>Clear</button>
-      </div>
-    </aside>
-  </div>
+  <!-- Scripts: vector engine (optional, but we include our light one) -->
+  <script src="./vector.js"></script>
+  <!-- Optional ImageTracer shim; our file below provides a tiny compatible API -->
+  <script src="./imagetracer_v1.2.6.js"></script>
 
-  <!-- Toasts -->
-  <div id="toastHost" aria-live="polite" aria-atomic="true"></div>
-
-  <!-- Libraries -->
-  <script src="vector.js"></script>
-  <script src="imagetracer_v1.2.6.js"></script>
-  <!-- App -->
-  <script src="app.js"></script>
+  <!-- Main app -->
+  <script src="./app.js?v=12"></script>
 </body>
 </html>
