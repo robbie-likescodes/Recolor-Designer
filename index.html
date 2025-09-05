@@ -2,8 +2,13 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1" />
+  <meta
+    name="viewport"
+    content="width=device-width,initial-scale=1,maximum-scale=1"
+  />
   <title>Palette Mapper – Cup Print Helper</title>
+
+  <!-- Make sure styles.css is in the same folder as index.html -->
   <link rel="stylesheet" href="./styles.css?v=12" id="app-css" />
 </head>
 <body>
@@ -11,9 +16,6 @@
     <div class="header-left">
       <h1>Palette Mapper</h1>
       <p>Reduce photos to limited colors for printing</p>
-    </div>
-    <div class="header-right">
-      <button id="openProjects" class="ghost" type="button" style="display:none">Projects</button>
     </div>
   </header>
 
@@ -26,16 +28,31 @@
       <button id="pasteBtn" type="button">Paste</button>
       <button id="resetBtn" type="button" disabled>Reset</button>
     </div>
-    <div class="help">Upload lets you choose Photo Library or Camera on iOS. “Camera” forces the camera only.</div>
+    <div class="help">
+      “Upload” lets you choose from Photo Library or Camera on iOS. “Camera” forces the camera only.
+    </div>
     <div class="row">
-      <label>Max preview width (px) <input id="maxW" type="number" min="600" value="1400" /></label>
-      <label class="check"><input id="keepFullRes" type="checkbox" checked /> Process at full resolution</label>
-      <label class="check"><input id="sharpenEdges" type="checkbox" /> Sharpen text edges</label>
+      <label>Max preview width (px)
+        <input id="maxW" type="number" min="600" value="1400" />
+      </label>
+      <label class="check">
+        <input id="keepFullRes" type="checkbox" checked />
+        Process at full resolution
+      </label>
+      <label class="check">
+        <input id="sharpenEdges" type="checkbox" />
+        Sharpen text edges
+      </label>
     </div>
     <div class="panel">
       <div class="panel-head">Original</div>
       <canvas id="srcCanvas"></canvas>
-      <div class="tiny-help">Tip: Long-press (mobile) or ALT-click (desktop) to sample a color.</div>
+      <div class="tiny-help">
+        Press &amp; hold to pick a color in the full-screen editor. On desktop, ALT-click works on this preview.
+      </div>
+      <div class="row">
+        <button id="openEditor" type="button">Open full-screen editor</button>
+      </div>
     </div>
   </section>
 
@@ -50,6 +67,15 @@
       <button id="savePalette" class="ghost" type="button">Save current</button>
       <button id="clearSavedPalettes" class="ghost" type="button">Clear saved</button>
     </div>
+    <details>
+      <summary>Auto-extract from image (optional)</summary>
+      <div class="row">
+        <label>K colors
+          <input id="kColors" type="number" min="2" max="16" value="6" />
+        </label>
+        <button id="autoExtract" type="button" disabled>Auto extract</button>
+      </div>
+    </details>
     <h3>Saved Palettes</h3>
     <div id="savedPalettes" class="saved-list"></div>
   </section>
@@ -68,7 +94,10 @@
       </label>
     </div>
     <div class="row">
-      <label class="check"><input id="useDither" type="checkbox" /> Use Floyd–Steinberg dithering</label>
+      <label class="check">
+        <input id="useDither" type="checkbox" />
+        Use Floyd–Steinberg dithering
+      </label>
       <label>Background
         <select id="bgMode">
           <option value="keep">Keep original</option>
@@ -79,45 +108,189 @@
     </div>
     <div class="row">
       <button id="applyBtn" type="button" disabled>Apply mapping</button>
+      <button id="refreshMapped" type="button" class="ghost">Refresh output</button>
+      <label>Export scale
+        <select id="exportScale">
+          <option value="1">×1</option>
+          <option value="2">×2</option>
+          <option value="4">×4</option>
+        </select>
+      </label>
       <button id="downloadBtn" type="button" disabled>Download PNG</button>
     </div>
   </section>
 
-  <!-- 4) Texture / Replace one color -->
-  <section class="card" id="textureCard">
+  <!-- 4) Texture / Replacement (single section; upper one only) -->
+  <section class="card">
     <h2>4) Texture / Replace one color</h2>
     <div class="row">
-      <button id="suggestBtn" type="button">Suggest replacements…</button>
-      <button id="refreshAllBtn" type="button" class="ghost">Refresh output</button>
+      <label>Target
+        <select id="texTarget">
+          <option value="auto">auto</option>
+        </select>
+      </label>
+      <label>Mode
+        <select id="texMode">
+          <option value="checker">Checker</option>
+          <option value="stripe">Stripe</option>
+          <option value="stipple">Stipple</option>
+        </select>
+      </label>
+      <label>Mix A
+        <select id="texMixA">
+          <option value="auto">auto</option>
+        </select>
+      </label>
+      <label>Mix B
+        <select id="texMixB">
+          <option value="auto">auto</option>
+        </select>
+      </label>
     </div>
-    <div id="texList" class="tiny-help" style="margin-top:10px"></div>
+    <div class="row">
+      <label>Density
+        <input id="texDensity" type="range" min="0" max="100" value="50" />
+      </label>
+      <label class="check">
+        <input id="texLumaAdaptive" type="checkbox" />
+        Luma-adaptive
+      </label>
+      <button id="texAddRule" type="button">Add rule</button>
+      <button id="texClear" class="ghost" type="button">Clear rules</button>
+    </div>
+    <div id="texRules" class="panel" style="padding:8px;">
+      <div class="help">No texture rules yet.</div>
+    </div>
   </section>
 
-  <!-- Mapped -->
+  <!-- 5) Suggestions & Smart Mix -->
+  <section class="card">
+    <h2>5) Suggestions & Smart Mix</h2>
+    <div class="panel" style="padding:10px;">
+      <h3 style="margin-top:0;">Suggest replacements</h3>
+      <div class="row">
+        <label class="check">
+          <input id="suggestGray" type="checkbox" checked />
+          Suggest gray (luminance)
+        </label>
+        <label class="check">
+          <input id="suggestHue" type="checkbox" checked />
+          Suggest by hue
+        </label>
+        <button id="suggestBtn" type="button">Suggest replacements</button>
+      </div>
+      <hr style="border-color:var(--line); opacity:.5;">
+      <h3>Smart Mix</h3>
+      <div class="row">
+        <label>Target HEX
+          <input id="smartTargetHex" type="text" placeholder="#55AA33" />
+        </label>
+        <label class="check">
+          <input id="smartAllowWhite" type="checkbox" checked />
+          Allow white
+        </label>
+        <label class="check">
+          <input id="smartAllowBlack" type="checkbox" checked />
+          Allow black
+        </label>
+        <label class="check">
+          <input id="smartTriples" type="checkbox" checked />
+          Try triples
+        </label>
+        <label>Step
+          <select id="smartStep">
+            <option value="2">2%</option>
+            <option value="5" selected>5%</option>
+            <option value="10">10%</option>
+          </select>
+        </label>
+        <button id="smartBtn" type="button">Smart mix → add rule</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Output -->
   <section class="card">
     <h2>Mapped</h2>
     <canvas id="outCanvas"></canvas>
+    <div class="tiny-help">Use “Refresh output” after tweaking rules/densities.</div>
   </section>
 
-  <!-- 5) Vector (SVG) -->
-  <section class="card" id="vectorCard">
-    <h2>Vector (SVG)</h2>
+  <!-- 6) Vector -->
+  <section class="card">
+    <h2>6) Vector (SVG)</h2>
     <div class="row">
-      <label>Simplify <input id="vecSimplify" type="range" min="0" max="100" value="35" /></label>
-      <label>Min area <input id="vecMinArea" type="number" min="1" value="8" /></label>
-      <label class="check"><input id="vecLockPal" type="checkbox" checked /> Lock to current palette</label>
-      <button id="exportSvgBtn" type="button">Export SVG</button>
+      <label>Simplify
+        <input id="vecSimplify" type="number" value="0.5" step="0.1" min="0" />
+      </label>
+      <label>Min area (px²)
+        <input id="vecMinArea" type="number" value="8" step="1" min="0" />
+      </label>
+      <label class="check">
+        <input id="vecLockPalette" type="checkbox" />
+        Lock to palette
+      </label>
+      <button id="downloadSvg" type="button" disabled>Export SVG</button>
     </div>
-    <div class="help">If <code>vector.js</code> or <code>imagetracer_v1.2.6.js</code> is present, they’ll be used; otherwise a simple built-in tracer runs.</div>
+    <div class="help">
+      Include <code>vector.js</code> or <code>imagetracer_v1.2.6.js</code> for SVG export.
+    </div>
   </section>
 
-  <!-- Optional PMS list for future use -->
-  <link rel="preload" href="./pms_solid_coated.json" as="fetch" crossorigin>
+  <!-- 7) Codes & Report -->
+  <section class="card">
+    <h2>7) Codes &amp; Report</h2>
+    <label>Show codes as:
+      <select id="colorCodeMode">
+        <option value="pms" selected>PMS (default)</option>
+        <option value="hex">HEX</option>
+      </select>
+    </label>
+    <div id="codeList" class="code-list"></div>
+    <div class="row">
+      <button id="exportReport" type="button">Export report</button>
+      <a id="mailtoLink" class="ghost" href="#">Email to printer</a>
+    </div>
+  </section>
 
-  <!-- Scripts: vector engine (optional, but we include our light one) -->
-  <script src="./vector.js"></script>
-  <!-- Optional ImageTracer shim; our file below provides a tiny compatible API -->
-  <script src="./imagetracer_v1.2.6.js"></script>
+  <!-- Full-screen editor -->
+  <div id="editorOverlay" class="hidden" aria-hidden="true">
+    <div class="editor-toolbar">
+      <button id="toolEyedrop" class="active" type="button">Eyedrop</button>
+      <button id="toolLasso" type="button">Lasso</button>
+      <button id="toolPan" type="button">Pan</button>
+      <div class="grow"></div>
+      <button id="editorDone" type="button">Done</button>
+    </div>
+    <canvas id="editCanvas"></canvas>
+    <canvas id="editOverlay"></canvas>
+    <aside class="editor-right">
+      <h3>Palette</h3>
+      <div id="editorPalette" class="editor-swatches"></div>
+
+      <h3>Eyedrop</h3>
+      <div class="row">
+        <span id="eyeSwatch" class="sw"></span>
+        <span id="eyeHex" class="mono">—</span>
+      </div>
+      <div class="row">
+        <button id="eyeAdd" type="button">Add</button>
+        <button id="eyeCancel" class="ghost" type="button">Cancel</button>
+      </div>
+
+      <h3>Lasso</h3>
+      <div id="lassoChecks" class="lasso-checks"></div>
+      <div class="row">
+        <button id="lassoSave" type="button" disabled>Save region</button>
+        <button id="lassoClear" class="ghost" type="button" disabled>Clear</button>
+      </div>
+    </aside>
+  </div>
+
+  <!-- Scripts -->
+  <!-- Optional vector backends (either is fine). Include one or both. -->
+  <!-- <script src="./vector.js"></script> -->
+  <!-- <script src="./imagetracer_v1.2.6.js"></script> -->
 
   <!-- Main app -->
   <script src="./app.js?v=12"></script>
