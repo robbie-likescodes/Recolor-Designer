@@ -2,7 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1" />
+  <meta
+    name="viewport"
+    content="width=device-width,initial-scale=1,maximum-scale=1"
+  />
   <title>Palette Mapper – Cup Print Helper</title>
   <link rel="stylesheet" href="./styles.css?v=10" id="app-css" />
 </head>
@@ -21,26 +24,39 @@
   <section class="card">
     <h2>1) Load image</h2>
     <div class="row">
-      <input id="fileInput" type="file" accept="image/*" />
-      <input id="cameraInput" type="file" accept="image/*" capture="environment" />
+      <label class="filelike">Upload
+        <input id="fileInput" type="file" accept="image/*" hidden />
+      </label>
+      <label class="filelike">Camera
+        <input id="cameraInput" type="file" accept="image/*" capture="environment" hidden />
+      </label>
       <button id="pasteBtn" type="button">Paste</button>
       <button id="resetBtn" type="button" disabled>Reset</button>
     </div>
     <div class="help">
       “Upload” lets you choose from Photo Library or Camera on iOS. “Camera” forces the camera only.
     </div>
-    <div class="row">
-      <label>Max preview width (px) <input id="maxW" type="number" min="600" value="1400" /></label>
-      <label class="check"><input id="keepFullRes" type="checkbox" checked /> Process at full resolution</label>
-      <label class="check"><input id="sharpenEdges" type="checkbox" /> Sharpen text edges</label>
+    <div class="row" style="margin-top:8px">
+      <label>Max preview width (px)
+        <input id="maxW" type="number" min="600" value="1400" />
+      </label>
+      <label class="check">
+        <input id="keepFullRes" type="checkbox" checked />
+        Process at full resolution
+      </label>
+      <label class="check">
+        <input id="sharpenEdges" type="checkbox" />
+        Sharpen text edges
+      </label>
     </div>
-    <div class="panel">
+
+    <div class="panel" style="margin-top:12px">
       <div class="panel-head">Original</div>
       <canvas id="srcCanvas"></canvas>
       <div class="tiny-help">
         Press &amp; hold to pick a color in the full-screen editor. On desktop, ALT-click works on this preview.
       </div>
-      <div class="row">
+      <div class="row" style="margin:8px 8px 12px">
         <button id="openEditor" type="button">Open full-screen editor</button>
       </div>
     </div>
@@ -57,32 +73,37 @@
       <button id="savePalette" class="ghost" type="button">Save current</button>
       <button id="clearSavedPalettes" class="ghost" type="button">Clear saved</button>
     </div>
-    <details>
+    <details style="margin-top:8px">
       <summary>Auto-extract from image (optional)</summary>
-      <div class="row">
-        <label>K colors <input id="kColors" type="number" min="2" max="16" value="6" /></label>
+      <div class="row" style="margin-top:8px">
+        <label>K colors
+          <input id="kColors" type="number" min="2" max="16" value="6" />
+        </label>
         <button id="autoExtract" type="button" disabled>Auto extract</button>
       </div>
     </details>
-    <h3>Saved Palettes</h3>
+    <h3 style="margin-top:14px">Saved Palettes</h3>
     <div id="savedPalettes" class="saved-list"></div>
   </section>
 
-  <!-- 3) Mapping -->
+  <!-- 3) Mapping options -->
   <section class="card">
     <h2>3) Mapping options</h2>
     <div class="row">
       <label>Chroma weight
         <input id="wChroma" type="range" min="20" max="200" value="100" />
-        <span id="wChromaOut" class="mono"></span>
+        <span id="wChromaOut" class="mono">1.00×</span>
       </label>
       <label>Lightness weight
         <input id="wLight" type="range" min="20" max="200" value="100" />
-        <span id="wLightOut" class="mono"></span>
+        <span id="wLightOut" class="mono">1.00×</span>
       </label>
     </div>
-    <div class="row">
-      <label class="check"><input id="useDither" type="checkbox" /> Use Floyd–Steinberg dithering</label>
+    <div class="row" style="margin-top:6px">
+      <label class="check">
+        <input id="useDither" type="checkbox" />
+        Use Floyd–Steinberg dithering
+      </label>
       <label>Background
         <select id="bgMode">
           <option value="keep">Keep original</option>
@@ -91,39 +112,42 @@
         </select>
       </label>
     </div>
+    <div class="row" style="margin-top:8px">
+      <button id="applyBtn" type="button" disabled>Apply mapping</button>
+      <button id="refreshMapBtn" type="button" disabled>Refresh mapping</button>
+      <button id="downloadBtn" type="button" disabled>Download PNG</button>
+      <button id="exportSvgBtn" class="ghost" type="button" disabled>Export SVG</button>
+    </div>
   </section>
 
-  <!-- 4) Texture / Replacement (single, cleaned section) -->
+  <!-- 4) Texture / Replacement (rules) -->
   <section class="card">
-    <h2>4) Texture / Replacement (one color → inks mix)</h2>
-
+    <h2>4) Texture / Replacement (one color → pattern of inks)</h2>
+    <div class="help" style="margin-bottom:8px">
+      Add rules to replace mapped hits of a given color with a 2+ ink pattern (checker, stripe, dots, ordered). Use “Suggest by Hue &amp; Luma” to auto-create starting rules.
+    </div>
     <div class="row">
       <button id="suggestByHueLuma" type="button" class="ghost">Suggest by Hue &amp; Luma</button>
-      <div class="help">Generates suggested replacements by analyzing hue &amp; luminance bands.</div>
+      <button id="addRuleBtn" type="button">+ Add replacement</button>
     </div>
 
-    <div class="panel">
-      <div class="panel-head">Replacement rules (enabled rules affect Final Inks report)</div>
-      <div class="help">Each rule replaces a target color with one or more inks from your palette (patterns/densities configured elsewhere).</div>
-      <div class="table-wrap">
-        <table class="rules">
+    <div class="panel" style="margin-top:10px">
+      <div class="panel-head">Replacement Rules</div>
+      <div style="overflow:auto">
+        <table style="width:100%; border-collapse:separate; border-spacing:0 6px; margin:8px 0">
           <thead>
             <tr>
-              <th>On</th>
-              <th>Target color</th>
-              <th>Replace with inks</th>
-              <th>Notes</th>
+              <th style="text-align:left; padding:4px 6px">On/Off</th>
+              <th style="text-align:left; padding:4px 6px">Target color</th>
+              <th style="text-align:left; padding:4px 6px">Inks</th>
+              <th style="text-align:left; padding:4px 6px">Pattern</th>
+              <th style="text-align:left; padding:4px 6px">Density</th>
+              <th style="text-align:left; padding:4px 6px">Edit inks</th>
+              <th style="text-align:left; padding:4px 6px">Delete</th>
             </tr>
           </thead>
           <tbody id="rulesTbody">
-            <!-- JS can insert rows like:
-            <tr data-target-hex="#808080" data-inks="#000000,#FFFFFF">
-              <td><input type="checkbox" data-role="enable" checked /></td>
-              <td><span class="sw sw-lg" style="background:#808080"></span> #808080</td>
-              <td>#000000, #FFFFFF</td>
-              <td>Checker 40% / custom</td>
-            </tr>
-            -->
+            <!-- Rows inserted by app.js -->
           </tbody>
         </table>
       </div>
@@ -141,35 +165,26 @@
     </div>
   </section>
 
-  <!-- 6) Output -->
+  <!-- Output -->
   <section class="card">
-    <h2>6) Output</h2>
-
-    <!-- BIG regenerate button is literally the existing Apply (same id) placed above the canvas -->
-    <div class="row sticky-apply">
-      <button id="applyBtn" type="button" disabled>Apply / Regenerate Mapping</button>
-      <button id="downloadBtn" type="button" disabled>Download PNG</button>
-    </div>
-
-    <div class="panel">
-      <div class="panel-head">Mapped</div>
-      <canvas id="outCanvas"></canvas>
-    </div>
+    <h2>Mapped</h2>
+    <canvas id="outCanvas"></canvas>
   </section>
 
-  <!-- 7) Codes & Report (FINAL inks) -->
+  <!-- 6) Codes & Report -->
   <section class="card">
-    <h2>7) Codes &amp; Report (Final Inks)</h2>
-    <label>Show codes as:
-      <select id="colorCodeMode">
-        <option value="pms">PMS (default)</option>
-        <option value="hex">HEX</option>
-      </select>
-    </label>
-    <div class="tiny-help">This list reflects **Final Inks** after replacements are applied.</div>
-    <div id="codeList" class="code-list"></div>
+    <h2>6) Codes &amp; Report</h2>
     <div class="row">
-      <button id="exportReport" type="button">Export final PMS report</button>
+      <label>Show codes as:
+        <select id="colorCodeMode">
+          <option value="pms">PMS (default)</option>
+          <option value="hex">HEX</option>
+        </select>
+      </label>
+    </div>
+    <div id="codeList" class="code-list" style="margin-top:8px"></div>
+    <div class="row" style="margin-top:8px">
+      <button id="exportReport" type="button">Export report</button>
       <a id="mailtoLink" class="ghost" href="#">Email to printer</a>
     </div>
   </section>
@@ -195,35 +210,41 @@
   <!-- Full-screen editor -->
   <div id="editorOverlay" class="hidden" aria-hidden="true">
     <div class="editor-toolbar">
-      <button id="toolEyedrop" class="active">Eyedrop</button>
-      <button id="toolLasso">Lasso</button>
-      <button id="toolPan">Pan</button>
+      <button id="toolEyedrop" class="active" type="button">Eyedrop</button>
+      <button id="toolLasso" type="button">Lasso</button>
+      <button id="toolPan" type="button">Pan</button>
       <div class="grow"></div>
-      <button id="editorDone">Done</button>
+      <button id="editorDone" type="button">Done</button>
     </div>
     <canvas id="editCanvas"></canvas>
     <canvas id="editOverlay"></canvas>
     <aside class="editor-right">
       <h3>Palette</h3>
       <div id="editorPalette" class="editor-swatches"></div>
+
       <h3>Eyedrop</h3>
       <div class="row">
-        <span id="eyeSwatch" class="sw"></span>
+        <span id="eyeSwatch" class="sw" style="width:20px;height:20px;border:1px solid #334155;border-radius:4px;display:inline-block"></span>
         <span id="eyeHex" class="mono">—</span>
       </div>
-      <div class="row">
+      <div class="row" style="margin-top:6px">
         <button id="eyeAdd" type="button">Add</button>
         <button id="eyeCancel" class="ghost" type="button">Cancel</button>
       </div>
-      <h3>Lasso</h3>
+
+      <h3 style="margin-top:10px">Lasso</h3>
       <div id="lassoChecks" class="lasso-checks"></div>
-      <div class="row">
+      <div class="row" style="margin-top:6px">
         <button id="lassoSave" type="button" disabled>Save region</button>
         <button id="lassoClear" class="ghost" type="button" disabled>Clear</button>
       </div>
     </aside>
   </div>
 
-  <script src="app.js"></script>
+  <!-- Optional: ImageTracer for SVG export (place before app.js so the button enables) -->
+  <!-- <script src="./imagetracer_v1.2.6.js"></script> -->
+
+  <!-- App -->
+  <script src="./app.js?v=10"></script>
 </body>
 </html>
