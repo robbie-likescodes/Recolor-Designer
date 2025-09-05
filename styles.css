@@ -9,8 +9,6 @@
   --line:#1e293b;
   --ghost:#16223d;
   --ghost-ink:#dbeafe;
-  --good:#22c55e;
-  --warn:#f59e0b;
 }
 
 /* ---- Base ---- */
@@ -81,17 +79,10 @@ canvas{ display:block; width:100%; height:auto; background:#0a142b; border:1px s
 
 /* Palette */
 .palette-list{ margin-bottom:8px; }
-.palette-item{
-  display:grid; grid-template-columns: 36px 90px 1fr auto auto;
-  align-items:center; gap:6px; padding:6px; margin:6px 0;
-  background:#0a132a; border:1px solid var(--line); border-radius:8px;
-}
+.palette-item{ display:flex; align-items:center; gap:6px; padding:6px; margin:6px 0;
+  background:#0a132a; border:1px solid var(--line); border-radius:8px; }
 .palette-item input[type="color"]{ width:36px; height:28px; }
-.palette-item input[type="text"]{ width:90px; font-family:ui-monospace,monospace; }
-.palette-item .sl{
-  display:flex; gap:8px; align-items:center; flex-wrap:wrap; color:var(--muted); font-size:12px;
-}
-.palette-item .sl input[type=range]{ width:140px; }
+.palette-item input[type="text"]{ width:110px; font-family:ui-monospace,monospace; }
 
 /* Saved palettes */
 .saved-list .item{ display:flex; justify-content:space-between; align-items:center;
@@ -100,12 +91,12 @@ canvas{ display:block; width:100%; height:auto; background:#0a142b; border:1px s
 .saved-list .item:hover{ background:#0c1730; }
 .saved-list .sw{ width:16px; height:16px; border:1px solid #334155; border-radius:4px; display:inline-block; }
 
-/* Codes & Report */
+/* Codes & Report (if you add later) */
 .code-list{ margin-top:.5rem; font-size:.95rem; line-height:1.6; }
 .code-list .row{ display:flex; align-items:center; gap:.5rem; }
 .code-list .sw{ width:14px; height:14px; border:1px solid #334155; border-radius:3px; display:inline-block; }
 
-/* Projects */
+/* Projects (optional) */
 .projects{ position:fixed; top:0; right:-380px; width:360px; bottom:0;
   background:#0b1225; border-left:1px solid var(--line); padding:12px; transition:right .25s ease; z-index:10; }
 .projects.open{ right:0; }
@@ -115,35 +106,17 @@ canvas{ display:block; width:100%; height:auto; background:#0a142b; border:1px s
   padding:8px; margin:6px 0; border:1px solid var(--line); border-radius:8px; background:#0a132a; cursor:pointer; }
 .projects-list .item.selected{ outline:2px solid #3b82f6; }
 
-/* Editor Overlay */
-#editorOverlay{ position:fixed; inset:0; z-index:9999; background:rgba(3,6,20,.96); display:flex; flex-direction:row; }
-#editorOverlay.hidden{ display:none; }
+/* Editor Overlay (if you re-add the fullscreen editor) */
+#editorOverlay{ position:fixed; inset:0; z-index:9999; background:rgba(3,6,20,.96); display:none; }
+#editorOverlay.visible{ display:block; }
 .editor-toolbar{ position:absolute; top:0; left:0; right:0; height:44px; display:flex; gap:8px; align-items:center; padding:6px;
   background:#08112a; border-bottom:1px solid var(--line); }
-.editor-toolbar .grow{ flex:1; }
-.editor-toolbar button.active{ background:#0ea5e9; color:#07223b; }
 #editCanvas,#editOverlay{ position:absolute; left:0; right:320px; top:44px; bottom:0; width:calc(100% - 320px); height:calc(100% - 44px); }
 #editOverlay{ pointer-events:none; }
 .editor-right{ position:absolute; top:44px; right:0; bottom:0; width:320px; background:#0b1225; border-left:1px solid var(--line);
   padding:10px; overflow:auto; z-index:3; }
 .editor-right h3{ margin:8px 0 6px; }
 .editor-right .sw{ width:20px; height:20px; border:1px solid #334155; border-radius:4px; display:inline-block; }
-
-/* Texture rules list */
-#texRulesList{ margin-top:6px; }
-#texRulesList .ok{ color:var(--good); }
-#texRulesList .warn{ color:var(--warn); }
-
-/* Toasts */
-#toastHost{
-  position:fixed; left:50%; transform:translateX(-50%);
-  bottom:16px; display:grid; gap:8px; z-index:99999;
-}
-.toast{
-  background:#0b1326; color:#e8ecf3; border:1px solid #2a3243;
-  border-radius:10px; padding:10px 12px; backdrop-filter:blur(8px);
-  max-width:92vw;
-}
 
 /* Responsive */
 @media (max-width:900px){
